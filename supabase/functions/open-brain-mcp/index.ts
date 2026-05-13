@@ -519,11 +519,42 @@ app.options("*", (c) => {
     return c.text("ok", 200, corsHeaders);
 });
 
-app.all("*", async (c) => {
+app.get("*", (c) => c.json({ status: "ok", service: "Open Brain MCP", version: "1.0.0" }, 200, corsHeaders));
+
+app.post("*", async (c) => {
     // Accept access key via header OR URL query parameter
-    const provided = c.req.header("x-brain-key") || new URL(c.req.url).searchParams.get("key");
+    const provided =
+        c.req.header("x-brain-key") ||
+        c.req.header("x-access-key") ||
+        new URL(c.req.url).searchParams.get("key");
     if (!provided || provided !== MCP_ACCESS_KEY) {
-        return c.json({ error: "Invalid or missing access key" }, 401, corsHeaders);
+        let id: string | number | null = null;
+        try {
+            const body = await c.req.raw.clone().json();
+            if (
+                body &&
+                typeof body === "object" &&
+                ("id" in body) &&
+                (typeof body.id === "string" || typeof body.id === "number" || body.id === null)
+            ) {
+                id = body.id;
+            }
+        } catch {
+            // Keep the auth response JSON-RPC-shaped even if the request body is not JSON.
+        }
+
+        return c.json(
+            {
+                jsonrpc: "2.0",
+                id,
+                error: {
+                    code: -32001,
+                    message: "Invalid or missing access key",
+                },
+            },
+            401,
+            corsHeaders
+        );
     }
 
     // Fix: Claude Desktop connectors don't send the Accept header that
@@ -546,5 +577,7 @@ app.all("*", async (c) => {
     await server.connect(transport);
     return transport.handleRequest(c);
 });
+
+app.all("*", (c) => c.json({ error: "Method not allowed" }, 405, corsHeaders));
 
 Deno.serve(app.fetch);
