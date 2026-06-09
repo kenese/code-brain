@@ -1,4 +1,7 @@
 {
+  "scripts": {
+    "validate:codex-plugin": "node scripts/validate-codex-plugin.mjs"
+  },
   "dependencies": {
     "deno": "^2.7.14"
   }

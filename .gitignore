@@ -19,6 +19,9 @@ coverage/
 !.env.example
 !.env.sample
 
+# Claude Code local settings (contains secrets/personal paths)
+.claude/settings.local.json
+
 # Supabase local state
 supabase/.temp/
 

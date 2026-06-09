@@ -463,11 +463,12 @@ server.registerTool(
             focus: z.string().optional(),
             branch: z.string().optional(),
             worktree: z.string().optional(),
+            repo_id: z.string().optional().describe("Explicit repo override for stateless callers"),
         },
     },
-    async ({ title, focus, branch, worktree }) => {
+    async ({ title, focus, branch, worktree, repo_id }) => {
         try {
-            const { repoId } = requireActive();
+            const repoId = repo_id || requireActive().repoId;
             const { data, error } = await supabase
                 .from("plans")
                 .insert({
@@ -516,8 +517,7 @@ server.registerTool(
     },
     async ({ text, plan_id }) => {
         try {
-            const { planId } = requireActive();
-            const target = plan_id || planId;
+            const target = plan_id || active.planId;
             if (!target) return err("No active plan. Use switch_plan or create_plan.");
             await supabase.from("plans").update({ focus: text, updated_at: new Date().toISOString() }).eq("id", target);
             return ok(`Focus updated.`);
@@ -725,8 +725,7 @@ server.registerTool(
     },
     async ({ title, plan_id, position }) => {
         try {
-            const { planId } = requireActive();
-            const target = plan_id || planId;
+            const target = plan_id || active.planId;
             if (!target) return err("No active plan.");
 
             const { data: existing } = await supabase
@@ -839,11 +838,15 @@ server.registerTool(
     {
         title: "Add idea",
         description: "Save a future-work idea / opportunity for the active repo.",
-        inputSchema: { title: z.string(), body: z.string().optional() },
+        inputSchema: {
+            title: z.string(),
+            body: z.string().optional(),
+            repo_id: z.string().optional().describe("Explicit repo override for stateless callers"),
+        },
     },
-    async ({ title, body }) => {
+    async ({ title, body, repo_id }) => {
         try {
-            const { repoId } = requireActive();
+            const repoId = repo_id || requireActive().repoId;
             const { data, error } = await supabase
                 .from("ideas")
                 .insert({ repo_id: repoId, title, body: body || null })
@@ -863,11 +866,13 @@ server.registerTool(
         title: "List ideas",
         description: "List the active repo's future-work ideas.",
         annotations: { readOnlyHint: true },
-        inputSchema: {},
+        inputSchema: {
+            repo_id: z.string().optional().describe("Explicit repo override for stateless callers"),
+        },
     },
-    async () => {
+    async ({ repo_id }) => {
         try {
-            const { repoId } = requireActive();
+            const repoId = repo_id || requireActive().repoId;
             const { data } = await supabase
                 .from("ideas")
                 .select("id, title")
@@ -889,11 +894,12 @@ server.registerTool(
         inputSchema: {
             idea_id: z.string(),
             branch: z.string().optional(),
+            repo_id: z.string().optional().describe("Explicit repo override for stateless callers"),
         },
     },
-    async ({ idea_id, branch }) => {
+    async ({ idea_id, branch, repo_id }) => {
         try {
-            const { repoId } = requireActive();
+            const repoId = repo_id || requireActive().repoId;
             const { data: idea } = await supabase.from("ideas").select("*").eq("id", idea_id).single();
             if (!idea) return err("Idea not found.");
             const { data: plan, error } = await supabase
@@ -928,11 +934,12 @@ server.registerTool(
             title: z.string(),
             body: z.string(),
             scope: z.enum(["repo", "global"]).optional().default("repo"),
+            repo_id: z.string().optional().describe("Explicit repo override for stateless callers"),
         },
     },
-    async ({ kind, title, body, scope }) => {
+    async ({ kind, title, body, scope, repo_id }) => {
         try {
-            const repoId = scope === "global" ? null : requireActive().repoId;
+            const repoId = scope === "global" ? null : (repo_id || requireActive().repoId);
             const [embedding, metadata] = await Promise.all([
                 getEmbedding(`${title}\n\n${body}`),
                 extractKnowledgeMetadata(kind, title, body),

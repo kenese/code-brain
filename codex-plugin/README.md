@@ -12,10 +12,11 @@ Installs the `dev-context` MCP server + lifecycle hooks for Codex CLI in one ste
 ## Install
 
 ```
-codex plugin install /Users/keneselautusi/Documents/Code/PROJECTS/open-brain/codex-plugin
+codex plugin add dev-context@personal
 ```
 
-(Or from the GitHub repo once pushed.)
+The personal marketplace must point `dev-context` at this plugin directory. For
+this machine that marketplace entry is `dev-context@personal`.
 
 ## Required environment
 
@@ -24,6 +25,8 @@ DEV_CONTEXT_MCP_KEY=<the access key>   # same as open-brain's MCP_ACCESS_KEY
 ```
 
 The `.mcp.json` passes it as the `x-access-key` header via `env_http_headers`.
+The key value is not stored in the plugin; Codex resolves `DEV_CONTEXT_MCP_KEY`
+from your environment when it starts the MCP server.
 
 ## Backend URL (different mechanism on Codex)
 
@@ -54,9 +57,23 @@ turn. So the background safety net (transcript→position_note on abrupt exit) i
 Claude Code / Gemini only. Codex still gets auto-connect, the watchdog, and the
 model-driven per-turn checkpoint nudge.
 
-## Verify against your Codex version
+## Verify
 
-Confirm the bundled `.mcp.json` shape matches your Codex build — some versions read
-`mcp_servers` inside `.mcp.json`, others a direct server map. If the server doesn't
-load, move the block into `~/.codex/config.toml` as `[mcp_servers.dev-context]`
-with `url` and `env_http_headers = { "x-access-key" = "DEV_CONTEXT_MCP_KEY" }`.
+Validate the packaged Codex metadata before publishing or reinstalling:
+
+```
+npm run validate:codex-plugin
+```
+
+Then reinstall and confirm Codex registers the bundled MCP server:
+
+```
+codex plugin add dev-context@personal
+codex mcp list
+```
+
+Current Codex plugin MCP files use an `.mcp.json` wrapper named `mcpServers`.
+The plugin manifest declares `"mcpServers": "./.mcp.json"` so Codex ingests that
+file during plugin install. If you need to override the server manually, keep the
+equivalent user config as `[mcp_servers.dev-context]` with `url` and
+`env_http_headers = { "x-access-key" = "DEV_CONTEXT_MCP_KEY" }`.

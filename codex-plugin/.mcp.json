@@ -1,6 +1,7 @@
 {
-  "mcp_servers": {
+  "mcpServers": {
     "dev-context": {
+      "type": "http",
       "url": "https://dpwdbusvukzbmcxvhkuh.supabase.co/functions/v1/dev-context-mcp",
       "env_http_headers": {
         "x-access-key": "DEV_CONTEXT_MCP_KEY"

@@ -1,0 +1,13 @@
+{
+  "enabledPlugins": {
+    "dev-context@open-brain-marketplace": true
+  },
+  "extraKnownMarketplaces": {
+    "open-brain-marketplace": {
+      "source": {
+        "source": "directory",
+        "path": "."
+      }
+    }
+  }
+}
