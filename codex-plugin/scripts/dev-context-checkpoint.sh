@@ -19,7 +19,18 @@ set -euo pipefail
 cd "${CLAUDE_PROJECT_DIR:-$PWD}" 2>/dev/null || true
 
 if [ "${1:-}" != "--background" ]; then
-    printf '%s\n' "dev-context: before finishing, if you completed any steps call complete_step, and capture where things stand with update_progress so the next session can pick up cleanly."
+    python3 - <<'PY'
+import json
+
+message = "dev-context: before finishing, if you completed any steps call complete_step, and capture where things stand with update_progress so the next session can pick up cleanly."
+print(json.dumps({
+    "additional_context": message,
+    "hookSpecificOutput": {
+        "hookEventName": "Stop",
+        "additionalContext": message,
+    },
+}))
+PY
     exit 0
 fi
 

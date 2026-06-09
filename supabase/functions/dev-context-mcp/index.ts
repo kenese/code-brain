@@ -537,12 +537,13 @@ server.registerTool(
         inputSchema: {
             note: z.string(),
             mark_in_progress: z.boolean().optional().default(true),
+            plan_id: z.string().optional().describe("Explicit plan override for stateless callers"),
         },
     },
-    async ({ note, mark_in_progress }) => {
+    async ({ note, mark_in_progress, plan_id }) => {
         try {
-            const { planId } = requireActive();
-            if (!planId) return err("No active plan.");
+            const planId = plan_id || active.planId;
+            if (!planId) return err("No active plan. Pass plan_id explicitly or call connect first.");
             const plan = await loadPlan(planId);
             if (!plan) return err("Active plan not found.");
             await supabase
@@ -567,12 +568,13 @@ server.registerTool(
             "Mark the active plan's current step done and advance the cursor to the next todo step in the phase. Call this as you finish meaningful units of work.",
         inputSchema: {
             note: z.string().optional().describe("Optional closing note for the step"),
+            plan_id: z.string().optional().describe("Explicit plan override for stateless callers"),
         },
     },
-    async ({ note }) => {
+    async ({ note, plan_id }) => {
         try {
-            const { planId } = requireActive();
-            if (!planId) return err("No active plan.");
+            const planId = plan_id || active.planId;
+            if (!planId) return err("No active plan. Pass plan_id explicitly or call connect first.");
             const plan = await loadPlan(planId);
             if (!plan || !plan.cursor_step_id) return err("No current step to complete.");
 
@@ -617,12 +619,13 @@ server.registerTool(
             "Archive the active plan's current phase: summarize it into a rollup and advance to the next phase. SURFACE THIS TO THE USER FIRST — call with confirm=false to preview what will be archived, then confirm=true once the user agrees.",
         inputSchema: {
             confirm: z.boolean().optional().default(false),
+            plan_id: z.string().optional().describe("Explicit plan override for stateless callers"),
         },
     },
-    async ({ confirm }) => {
+    async ({ confirm, plan_id }) => {
         try {
-            const { planId } = requireActive();
-            if (!planId) return err("No active plan.");
+            const planId = plan_id || active.planId;
+            if (!planId) return err("No active plan. Pass plan_id explicitly or call connect first.");
             const plan = await loadPlan(planId);
             if (!plan || !plan.cursor_phase_id) return err("No current phase.");
 
