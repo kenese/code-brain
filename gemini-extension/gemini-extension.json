@@ -1,0 +1,13 @@
+{
+  "name": "dev-context",
+  "version": "1.0.0",
+  "description": "Per-repo coding context + reusable knowledge MCP, with auto-connect/checkpoint hooks.",
+  "mcpServers": {
+    "dev-context": {
+      "httpUrl": "$DEV_CONTEXT_MCP_URL",
+      "headers": {
+        "x-access-key": "$DEV_CONTEXT_MCP_KEY"
+      }
+    }
+  }
+}

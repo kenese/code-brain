@@ -1,0 +1,13 @@
+{
+  "name": "open-brain-marketplace",
+  "owner": {
+    "name": "kenese"
+  },
+  "plugins": [
+    {
+      "name": "dev-context",
+      "source": "./plugins/dev-context",
+      "description": "Per-repo coding context + reusable knowledge, with auto-connect and auto-checkpoint hooks. Wires the dev-context MCP server and its lifecycle hooks in one install."
+    }
+  ]
+}

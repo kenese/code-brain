@@ -1,0 +1,49 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "name": "dev-context-connect",
+            "type": "command",
+            "command": "bash \"${extensionPath}/scripts/dev-context-connect.sh\""
+          }
+        ]
+      }
+    ],
+    "AfterTool": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "name": "dev-context-watchdog",
+            "type": "command",
+            "command": "bash \"${extensionPath}/scripts/dev-context-watchdog.sh\""
+          }
+        ]
+      }
+    ],
+    "AfterAgent": [
+      {
+        "hooks": [
+          {
+            "name": "dev-context-checkpoint",
+            "type": "command",
+            "command": "bash \"${extensionPath}/scripts/dev-context-checkpoint.sh\""
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "name": "dev-context-checkpoint-bg",
+            "type": "command",
+            "command": "bash \"${extensionPath}/scripts/dev-context-checkpoint.sh\" --background"
+          }
+        ]
+      }
+    ]
+  }
+}
