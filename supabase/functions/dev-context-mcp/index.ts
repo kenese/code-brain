@@ -48,6 +48,21 @@ type Step = {
     order_index: number;
 };
 
+export const DEFAULT_INITIAL_PLANNING_PHASE_TITLE = "Spec and plan work";
+
+export function shouldCreateInitialPlanningPhase(scaffoldPlanningPhase?: boolean): boolean {
+    return scaffoldPlanningPhase !== false;
+}
+
+export function buildInitialPlanningPhaseInsert(planId: string) {
+    return {
+        plan_id: planId,
+        title: DEFAULT_INITIAL_PLANNING_PHASE_TITLE,
+        status: "active",
+        order_index: 0,
+    };
+}
+
 // --- Active session context (best-effort per warm instance) ---
 // connect() sets this; cursor tools read it. Tools also accept explicit
 // repo/plan overrides so a cold instance can still be driven by the agent,
@@ -463,10 +478,14 @@ server.registerTool(
             focus: z.string().optional(),
             branch: z.string().optional(),
             worktree: z.string().optional(),
+            scaffold_planning_phase: z
+                .boolean()
+                .optional()
+                .describe("When true/default, create an initial active phase for spec and planning work."),
             repo_id: z.string().optional().describe("Explicit repo override for stateless callers"),
         },
     },
-    async ({ title, focus, branch, worktree, repo_id }) => {
+    async ({ title, focus, branch, worktree, scaffold_planning_phase, repo_id }) => {
         try {
             const repoId = repo_id || requireActive().repoId;
             const { data, error } = await supabase
@@ -482,7 +501,29 @@ server.registerTool(
                 .single();
             if (error) return err(`create_plan error: ${error.message}`);
             active.planId = data.id;
-            return ok(`Created plan "${title}" (id: ${data.id})${branch ? ` bound to ${branch}` : ""}. It is now active.`);
+
+            let initialPhaseText = "";
+            if (shouldCreateInitialPlanningPhase(scaffold_planning_phase)) {
+                const { data: phase, error: phaseError } = await supabase
+                    .from("phases")
+                    .insert(buildInitialPlanningPhaseInsert(data.id))
+                    .select("id")
+                    .single();
+                if (phaseError) return err(`create_plan error: ${phaseError.message}`);
+                await supabase
+                    .from("plans")
+                    .update({
+                        cursor_phase_id: phase.id,
+                        position_note: "Start by clarifying scope, writing the spec, and decomposing the work.",
+                        updated_at: new Date().toISOString(),
+                    })
+                    .eq("id", data.id);
+                initialPhaseText = ` Initial phase: "${DEFAULT_INITIAL_PLANNING_PHASE_TITLE}".`;
+            }
+
+            return ok(
+                `Created plan "${title}" (id: ${data.id})${branch ? ` bound to ${branch}` : ""}. It is now active.${initialPhaseText}`
+            );
         } catch (e) {
             return err(`create_plan error: ${(e as Error).message}`);
         }
@@ -1078,4 +1119,6 @@ app.post("*", async (c) => {
 
 app.all("*", (c) => c.json({ error: "Method not allowed" }, 405, corsHeaders));
 
-Deno.serve(app.fetch);
+if (import.meta.main) {
+    Deno.serve(app.fetch);
+}
