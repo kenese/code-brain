@@ -51,7 +51,62 @@ archiving). Most other tools accept an explicit `plan_id`/`repo_id` override
 so a cold function instance (no in-memory `active` state) can still be
 driven correctly.
 
-### 2. The hooks (`plugins/dev-context/scripts/*.sh`)
+### 2. How saving and retrieving actually works
+
+Every tool call is one HTTP request straight to the Edge Function — there's
+no queue or separate write path. What happens inside falls into three
+shapes depending on the tool:
+
+**Plans / phases / steps — plain CRUD, until a phase completes.**
+`create_plan` / `add_phase` / `add_step` are straight inserts that also keep
+the plan's cursor (`cursor_phase_id`, `cursor_step_id`) in sync in the same
+request. `complete_step` marks the current step `done`, finds the next
+`todo` step in that phase, marks it `in_progress`, and moves the cursor to
+it. `complete_phase` (with `confirm=true`) is the one exception: it sends
+the phase's title + steps to OpenRouter (`gpt-4o-mini`) for a JSON summary,
+embeds that summary via OpenRouter (`text-embedding-3-small`), and writes
+both `rollup` and `rollup_embedding` to the `phases` row before advancing
+the plan to its next phase (or marking the plan `done` if none remain). That
+embedding isn't queried by any tool yet — the migration also defines a
+`match_phase_history` RPC for semantically recalling old phase rollups, but
+nothing calls it today. Retrieval (`get_plan` / `get_phase` / `get_step`,
+and the plan render `connect` returns) is plain `select`s by id, joined in
+application code — no RPC involved.
+
+**Ideas — plain CRUD.** `add_idea` inserts a row. `list_ideas` selects only
+`id, title` ordered by `created_at desc` (bodies are left out to keep the
+list cheap) — use `get_idea` for the full body. `promote_idea_to_plan`
+reads the idea, creates a plan from its title/body, then **deletes** the
+idea row: the idea becomes the plan rather than being copied into one.
+
+**Knowledge — the only capability that goes through embeddings + a
+Postgres RPC.** `save_knowledge` fires two OpenRouter calls in parallel: an
+embedding of `title\n\nbody` (`text-embedding-3-small`) and a metadata
+extraction (`gpt-4o-mini` pulling `language`/`topics`/`tags` as JSON), then
+inserts the row via the `upsert_knowledge` SQL RPC (returns the new id) and
+follows up with an `update` to patch the `embedding` column in — insert then
+patch, rather than one insert, because the embedding and metadata calls
+finish independently. `search_knowledge` embeds the query text and calls
+the `match_knowledge` RPC with `query_embedding`, `match_count` (the
+requested limit), a hardcoded `match_threshold` of `0.4`, an optional
+`kind_filter`, and a scope flag: `scope=repo` passes `repo_filter=<active
+repo>` — but the RPC also ORs in rows with a null `repo_id`, so global
+knowledge always surfaces alongside repo-scoped knowledge; `scope=global`
+sets `only_global=true` and excludes repo-scoped rows entirely; `scope=all`
+passes no filter, so everything is a candidate. Matches are ordered by
+cosine distance (pgvector's `<=>` operator) ascending — closest first — and
+anything below the similarity threshold is dropped before it reaches you.
+
+**`connect()`'s plan resolution**, in full: it upserts the `repos` row,
+then picks the active plan by trying a `branch` match first and falling
+back to a `worktree_path` match, both restricted to `status != "done"`. The
+winning id is cached in a module-level `active` variable — but that only
+survives while the Deno function instance stays warm; a cold start resets
+it silently. That's why almost every other tool accepts an explicit
+`plan_id` / `repo_id` override — it's not redundant, it's what keeps things
+working when `active` has been reset without you noticing.
+
+### 3. The hooks (`plugins/dev-context/scripts/*.sh`)
 
 Three harness-agnostic bash scripts don't call the MCP server directly —
 they print an instruction that the agent then acts on via its own MCP
@@ -81,7 +136,7 @@ CLI (only the event name and config format differ per harness):
     quietly no-ops if `DEV_CONTEXT_SUPABASE_URL` / `DEV_CONTEXT_SERVICE_KEY`
     / `OPENROUTER_API_KEY` aren't set.
 
-### 3. Packaging per harness
+### 4. Packaging per harness
 
 The same three scripts are bundled three times, once per harness, each with
 its own manifest/config wiring the harness's actual event names to the
