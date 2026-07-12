@@ -34,7 +34,8 @@ fi
 msg="dev-context: session started in repo \"$repo\""
 [ -n "$branch" ] && msg="$msg on branch \"$branch\""
 msg="$msg (worktree: $worktree).
-Call the dev-context \"connect\" tool now with repo=\"$repo\"${branch:+, branch=\"$branch\"}, worktree=\"$worktree\" to load your architecture, active plan, and current step before doing other work."
+Call the dev-context \"connect\" tool now with repo=\"$repo\"${branch:+, branch=\"$branch\"}, worktree=\"$worktree\" to load your architecture, active plan, and current step before doing other work.
+If you have a stable session identity available (e.g. a cmux/tmux pane, tab, or workspace ref from an \"identify\"-style tool), also pass session_ref on connect (plus host/source, and role=\"orchestrator\" if you plan to spawn sub-agents, or parent_session_ref if another agent spawned you) so this session shows up in list_sessions/overview."
 
 if [ "${1:-}" = "--format=json" ]; then
     # Claude Code structured SessionStart output.

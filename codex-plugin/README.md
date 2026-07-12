@@ -57,6 +57,37 @@ turn. So the background safety net (transcript→position_note on abrupt exit) i
 Claude Code / Gemini only. Codex still gets auto-connect, the watchdog, and the
 model-driven per-turn checkpoint nudge.
 
+## Agent orchestration: kinds, sessions, and the dashboard
+
+dev-context tracks more than one style of work per repo, and can track the agents
+doing that work as a tree — without dev-context itself touching cmux/tmux (it's a
+remote Supabase function; the *orchestrator agent* does the actual spawning via its
+own terminal-multiplexer tools, and just reports state back).
+
+- **Plan `kind`** — every plan has a freeform `kind` (`sprint` by default; `spike`
+  and `maintenance` are the other built-ins). `connect` returns a kind-specific
+  working contract: `sprint` holds to full engineering rigor and tests before
+  `complete_phase`; `spike` says move fast, skip heavy test coverage, prove the
+  point; `maintenance` says stay long-running and spawn a child plan
+  (`parent_plan_id`) per concrete fix rather than fixing inline. `create_plan`
+  takes `kind`, `ticket_ref` (e.g. a Jira key), and `parent_plan_id`.
+- **Agent sessions** — `register_session` upserts a running agent keyed on
+  whatever stable ref it reports (e.g. a cmux `workspace:`/`surface:` ref from an
+  `identify`-style tool, or a tmux pane) plus `host`/`source` to disambiguate
+  across machines. An orchestrator registers itself with `role="orchestrator"`,
+  spawns children, and each child registers with `parent_session_ref` set to the
+  orchestrator's ref — building a tree. Sessions call `heartbeat_session` as they
+  work (`status`, `activity`) and `end_session` when done.
+- **`list_sessions`** renders that tree, flagging sessions whose heartbeat has
+  gone stale while still `running`.
+- **`overview`** is the dashboard: across one repo or all of them, it lists plans
+  (nested under their parent, with kind/status/ticket/progress %) and appends an
+  Attention section — plans that are `blocked`/`paused` or stale, and sessions
+  that are `waiting_input`, `failed`, or stuck — plus a compact session tree.
+
+`connect` auto-registers a session when you pass it `session_ref` (see the
+SessionStart hook message for the exact args).
+
 ## Verify
 
 Validate the packaged Codex metadata before publishing or reinstalling:
