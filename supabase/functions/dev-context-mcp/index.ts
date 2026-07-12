@@ -811,14 +811,15 @@ server.registerTool(
     {
         title: "Add step",
         description:
-            "Add a step to a phase. If the phase is the cursor phase and has no current step, this step becomes the cursor step.",
+            "Add a step to a phase. If the phase is the cursor phase (of the active plan, or a given plan) and has no current step, this step becomes the cursor step.",
         inputSchema: {
             phase_id: z.string(),
             title: z.string(),
             detail: z.string().optional(),
+            plan_id: z.string().optional().describe("Explicit plan override for stateless callers"),
         },
     },
-    async ({ phase_id, title, detail }) => {
+    async ({ phase_id, title, detail, plan_id }) => {
         try {
             const { data: existing } = await supabase
                 .from("steps")
@@ -835,8 +836,8 @@ server.registerTool(
                 .single();
             if (error) return err(`add_step error: ${error.message}`);
 
-            // If this phase is the active plan's cursor phase with no current step, adopt it.
-            const { planId } = active;
+            // If this phase is the target plan's cursor phase with no current step, adopt it.
+            const planId = plan_id || active.planId;
             if (planId) {
                 const plan = await loadPlan(planId);
                 if (plan && plan.cursor_phase_id === phase_id && !plan.cursor_step_id) {
