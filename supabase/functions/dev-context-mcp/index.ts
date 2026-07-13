@@ -26,6 +26,7 @@ type Plan = {
     cursor_phase_id: string | null;
     cursor_step_id: string | null;
     position_note: string;
+    jira_ticket: string | null;
 };
 
 type Phase = {
@@ -60,6 +61,34 @@ export function buildInitialPlanningPhaseInsert(planId: string) {
         title: DEFAULT_INITIAL_PLANNING_PHASE_TITLE,
         status: "active",
         order_index: 0,
+    };
+}
+
+// Free-form Jira reference (bare key like "NOC-2359" or a full URL) — not
+// validated against any one Jira site's format. Empty/missing means unset.
+export function normalizeJiraTicket(jiraTicket?: string | null): string | null {
+    return jiraTicket ? jiraTicket : null;
+}
+
+export function formatJiraSuffix(jiraTicket?: string | null): string {
+    return jiraTicket ? ` (Jira: ${jiraTicket})` : "";
+}
+
+export function buildPlanInsert(params: {
+    repoId: string;
+    title: string;
+    focus?: string;
+    branch?: string;
+    worktree?: string;
+    jiraTicket?: string;
+}) {
+    return {
+        repo_id: params.repoId,
+        title: params.title,
+        focus: params.focus || "",
+        branch: params.branch || null,
+        worktree_path: params.worktree || null,
+        jira_ticket: normalizeJiraTicket(params.jiraTicket),
     };
 }
 
@@ -206,7 +235,7 @@ async function loadPlan(planId: string): Promise<Plan | null> {
 }
 
 async function renderActivePlan(plan: Plan): Promise<string> {
-    const lines: string[] = [`### Active plan: ${plan.title}`];
+    const lines: string[] = [`### Active plan: ${plan.title}${formatJiraSuffix(plan.jira_ticket)}`];
     if (plan.focus) lines.push(`Focus: ${plan.focus}`);
     if (plan.branch) lines.push(`Branch: ${plan.branch}`);
 
@@ -283,10 +312,13 @@ server.registerTool(
 
             const { data: plans } = await supabase
                 .from("plans")
-                .select("id, title, branch, status")
+                .select("id, title, branch, status, jira_ticket")
                 .eq("repo_id", repo)
                 .order("updated_at", { ascending: false });
-            const planList = (plans || []) as Pick<Plan, "id" | "title" | "branch" | "status">[];
+            const planList = (plans || []) as Pick<
+                Plan,
+                "id" | "title" | "branch" | "status" | "jira_ticket"
+            >[];
 
             const { data: ideas } = await supabase
                 .from("ideas")
@@ -325,7 +357,7 @@ server.registerTool(
                 for (const p of planList) {
                     const marker = p.id === activePlan?.id ? "→" : " ";
                     out.push(
-                        `${marker} ${p.title} [${p.status}${p.branch ? `, ${p.branch}` : ""}] (id: ${p.id})`
+                        `${marker} ${p.title} [${p.status}${p.branch ? `, ${p.branch}` : ""}]${formatJiraSuffix(p.jira_ticket)} (id: ${p.id})`
                     );
                 }
             } else {
@@ -374,7 +406,11 @@ server.registerTool(
                 .select("*")
                 .eq("plan_id", id)
                 .order("order_index", { ascending: true });
-            const lines = [`Plan: ${plan.title}`, `Focus: ${plan.focus}`, `Status: ${plan.status}`];
+            const lines = [
+                `Plan: ${plan.title}${formatJiraSuffix(plan.jira_ticket)}`,
+                `Focus: ${plan.focus}`,
+                `Status: ${plan.status}`,
+            ];
             for (const ph of (phases || []) as Phase[]) {
                 lines.push("", `[${ph.status}] ${ph.title} (id: ${ph.id})`);
                 if (ph.rollup) lines.push(`  rollup: ${ph.rollup}`);
@@ -483,20 +519,18 @@ server.registerTool(
                 .optional()
                 .describe("When true/default, create an initial active phase for spec and planning work."),
             repo_id: z.string().optional().describe("Explicit repo override for stateless callers"),
+            jira_ticket: z
+                .string()
+                .optional()
+                .describe("Jira ticket reference to attach, e.g. 'NOC-2359' or a full URL"),
         },
     },
-    async ({ title, focus, branch, worktree, scaffold_planning_phase, repo_id }) => {
+    async ({ title, focus, branch, worktree, scaffold_planning_phase, repo_id, jira_ticket }) => {
         try {
             const repoId = repo_id || requireActive().repoId;
             const { data, error } = await supabase
                 .from("plans")
-                .insert({
-                    repo_id: repoId,
-                    title,
-                    focus: focus || "",
-                    branch: branch || null,
-                    worktree_path: worktree || null,
-                })
+                .insert(buildPlanInsert({ repoId, title, focus, branch, worktree, jiraTicket: jira_ticket }))
                 .select("id")
                 .single();
             if (error) return err(`create_plan error: ${error.message}`);
@@ -522,7 +556,7 @@ server.registerTool(
             }
 
             return ok(
-                `Created plan "${title}" (id: ${data.id})${branch ? ` bound to ${branch}` : ""}. It is now active.${initialPhaseText}`
+                `Created plan "${title}" (id: ${data.id})${branch ? ` bound to ${branch}` : ""}${formatJiraSuffix(jira_ticket)}. It is now active.${initialPhaseText}`
             );
         } catch (e) {
             return err(`create_plan error: ${(e as Error).message}`);
@@ -564,6 +598,35 @@ server.registerTool(
             return ok(`Focus updated.`);
         } catch (e) {
             return err(`update_focus error: ${(e as Error).message}`);
+        }
+    }
+);
+
+server.registerTool(
+    "update_jira_ticket",
+    {
+        title: "Update plan Jira ticket",
+        description:
+            "Set, change, or clear the Jira ticket reference on a plan (free-form: a bare key like 'NOC-2359' or a full URL). Pass an empty string to clear.",
+        inputSchema: {
+            jira_ticket: z
+                .string()
+                .describe("Jira ticket reference, e.g. 'NOC-2359' or a full URL. Pass an empty string to clear."),
+            plan_id: z.string().optional().describe("Explicit plan override for stateless callers"),
+        },
+    },
+    async ({ jira_ticket, plan_id }) => {
+        try {
+            const target = plan_id || active.planId;
+            if (!target) return err("No active plan. Use switch_plan or create_plan.");
+            const value = normalizeJiraTicket(jira_ticket);
+            await supabase
+                .from("plans")
+                .update({ jira_ticket: value, updated_at: new Date().toISOString() })
+                .eq("id", target);
+            return ok(value ? `Jira ticket set to ${value}.` : "Jira ticket cleared.");
+        } catch (e) {
+            return err(`update_jira_ticket error: ${(e as Error).message}`);
         }
     }
 );

@@ -17,8 +17,9 @@ checked against `MCP_ACCESS_KEY`. It's backed by Supabase Postgres tables:
 
 - **`repos`** — one row per repo, holds a freeform `architecture_doc`.
 - **`plans`** — a line of work in a repo, optionally bound to a `branch` /
-  `worktree_path`. Tracks a cursor (`cursor_phase_id`, `cursor_step_id`) and a
-  `position_note` ("you are here").
+  `worktree_path`. Tracks a cursor (`cursor_phase_id`, `cursor_step_id`), a
+  `position_note` ("you are here"), and an optional free-form `jira_ticket`
+  reference (a bare key like `NOC-2359` or a full URL).
 - **`phases`** — ordered stages of a plan (`upcoming` → `active` → `done`).
   Completed phases get an LLM-written `rollup` (+ embedding) instead of
   keeping all their steps in view.
@@ -34,7 +35,7 @@ Exposed MCP tools, roughly grouped:
 | Group | Tools |
 |---|---|
 | Orient | `connect`, `get_plan`, `get_phase`, `get_step`, `get_idea` |
-| Plan lifecycle | `create_plan`, `switch_plan`, `update_focus` |
+| Plan lifecycle | `create_plan`, `switch_plan`, `update_focus`, `update_jira_ticket` |
 | Cursor (frequent) | `update_progress`, `complete_step`, `complete_phase` |
 | Structure | `add_phase`, `add_step`, `update_architecture` |
 | Ideas | `add_idea`, `list_ideas`, `promote_idea_to_plan` |
@@ -60,7 +61,10 @@ shapes depending on the tool:
 **Plans / phases / steps — plain CRUD, until a phase completes.**
 `create_plan` / `add_phase` / `add_step` are straight inserts that also keep
 the plan's cursor (`cursor_phase_id`, `cursor_step_id`) in sync in the same
-request. `complete_step` marks the current step `done`, finds the next
+request. `create_plan` accepts an optional `jira_ticket` at creation time;
+`update_jira_ticket` sets/changes/clears it afterward (same shape as
+`update_focus`) — pass an empty string to clear. Plans without a ticket just
+omit it from `get_plan` / `connect` output. `complete_step` marks the current step `done`, finds the next
 `todo` step in that phase, marks it `in_progress`, and moves the cursor to
 it. `complete_phase` (with `confirm=true`) is the one exception: it sends
 the phase's title + steps to OpenRouter (`gpt-4o-mini`) for a JSON summary,
