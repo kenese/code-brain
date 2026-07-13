@@ -9,6 +9,9 @@ const {
     shouldCreateInitialPlanningPhase,
     DEFAULT_INITIAL_PLANNING_PHASE_TITLE,
     buildInitialPlanningPhaseInsert,
+    normalizeJiraTicket,
+    formatJiraSuffix,
+    buildPlanInsert,
 } = await import("./index.ts");
 
 Deno.test("create_plan scaffolds planning phase by default", () => {
@@ -30,4 +33,34 @@ Deno.test("initial planning phase is active first phase", () => {
         status: "active",
         order_index: 0,
     });
+});
+
+Deno.test("create_plan with a jira ticket stores it on the insert payload", () => {
+    assertEquals(
+        buildPlanInsert({ repoId: "repo-1", title: "Plan A", jiraTicket: "NOC-2359" }).jira_ticket,
+        "NOC-2359"
+    );
+});
+
+Deno.test("create_plan without a jira ticket stores null", () => {
+    assertEquals(buildPlanInsert({ repoId: "repo-1", title: "Plan A" }).jira_ticket, null);
+});
+
+Deno.test("update_jira_ticket sets a new ticket reference", () => {
+    assertEquals(normalizeJiraTicket("NOC-2359"), "NOC-2359");
+});
+
+Deno.test("update_jira_ticket clears the ticket reference on empty input", () => {
+    assertEquals(normalizeJiraTicket(""), null);
+    assertEquals(normalizeJiraTicket(undefined), null);
+    assertEquals(normalizeJiraTicket(null), null);
+});
+
+Deno.test("formatJiraSuffix renders a parenthetical when set", () => {
+    assertEquals(formatJiraSuffix("NOC-2359"), " (Jira: NOC-2359)");
+});
+
+Deno.test("formatJiraSuffix is empty when unset", () => {
+    assertEquals(formatJiraSuffix(null), "");
+    assertEquals(formatJiraSuffix(undefined), "");
 });
