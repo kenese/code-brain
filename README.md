@@ -18,8 +18,17 @@ checked against `MCP_ACCESS_KEY`. It's backed by Supabase Postgres tables:
 - **`repos`** — one row per repo, holds a freeform `architecture_doc`.
 - **`plans`** — a line of work in a repo, optionally bound to a `branch` /
   `worktree_path`. Tracks a cursor (`cursor_phase_id`, `cursor_step_id`), a
-  `position_note` ("you are here"), and an optional free-form `jira_ticket`
-  reference (a bare key like `NOC-2359` or a full URL).
+  `position_note` ("you are here"), a freeform `kind` (`sprint` by default;
+  `spike`/`maintenance` are the other built-ins, each shaping the working
+  contract `connect` returns), an optional `ticket_ref` and/or free-form
+  `jira_ticket` reference (a bare key like `NOC-2359` or a full URL), and an
+  optional `parent_plan_id` for nesting (e.g. a maintenance loop spawning
+  short-lived fix plans).
+- **`agent_sessions`** — a live/historical record of a running agent, keyed
+  on a caller-reported `session_ref` (e.g. a cmux `workspace:`/`surface:`
+  ref) plus `host`/`source` to disambiguate across machines. Sessions can
+  nest via `parent_session_id` so an orchestrator's spawned children show up
+  as a tree.
 - **`phases`** — ordered stages of a plan (`upcoming` → `active` → `done`).
   Completed phases get an LLM-written `rollup` (+ embedding) instead of
   keeping all their steps in view.
@@ -40,6 +49,7 @@ Exposed MCP tools, roughly grouped:
 | Structure | `add_phase`, `add_step`, `update_architecture` |
 | Ideas | `add_idea`, `list_ideas`, `promote_idea_to_plan` |
 | Knowledge | `save_knowledge`, `search_knowledge` |
+| Orchestration | `register_session`, `heartbeat_session`, `end_session`, `list_sessions`, `overview` |
 
 `connect(repo, branch, worktree)` is the one call that orients a session: it
 upserts the repo row, resolves the active plan by matching `branch` (falling
