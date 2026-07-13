@@ -30,6 +30,7 @@ type Plan = {
     cursor_step_id: string | null;
     position_note: string;
     updated_at: string;
+    jira_ticket: string | null;
 };
 
 type Phase = {
@@ -109,6 +110,40 @@ export function buildInitialPlanningPhaseInsert(planId: string) {
         title: DEFAULT_INITIAL_PLANNING_PHASE_TITLE,
         status: "active",
         order_index: 0,
+    };
+}
+
+// Free-form Jira reference (bare key like "NOC-2359" or a full URL) — not
+// validated against any one Jira site's format. Empty/missing means unset.
+export function normalizeJiraTicket(jiraTicket?: string | null): string | null {
+    return jiraTicket ? jiraTicket : null;
+}
+
+export function formatJiraSuffix(jiraTicket?: string | null): string {
+    return jiraTicket ? ` (Jira: ${jiraTicket})` : "";
+}
+
+export function buildPlanInsert(params: {
+    repoId: string;
+    title: string;
+    focus?: string;
+    branch?: string;
+    worktree?: string;
+    kind?: string;
+    ticketRef?: string;
+    parentPlanId?: string;
+    jiraTicket?: string;
+}) {
+    return {
+        repo_id: params.repoId,
+        title: params.title,
+        focus: params.focus || "",
+        branch: params.branch || null,
+        worktree_path: params.worktree || null,
+        kind: params.kind || DEFAULT_PLAN_KIND,
+        ticket_ref: params.ticketRef || null,
+        parent_plan_id: params.parentPlanId || null,
+        jira_ticket: normalizeJiraTicket(params.jiraTicket),
     };
 }
 
@@ -479,7 +514,7 @@ async function registerSessionRow(params: {
 }
 
 async function renderActivePlan(plan: Plan): Promise<string> {
-    const lines: string[] = [`### Active plan: ${plan.title}`];
+    const lines: string[] = [`### Active plan: ${plan.title}${formatJiraSuffix(plan.jira_ticket)}`];
     lines.push(`Kind: ${plan.kind}`);
     if (plan.focus) lines.push(`Focus: ${plan.focus}`);
     if (plan.branch) lines.push(`Branch: ${plan.branch}`);
@@ -571,11 +606,13 @@ server.registerTool(
 
             const { data: plans } = await supabase
                 .from("plans")
-                .select("id, title, branch, status, kind, ticket_ref, parent_plan_id")
+                .select("id, title, branch, status, kind, ticket_ref, parent_plan_id, jira_ticket")
                 .eq("repo_id", repo)
                 .order("updated_at", { ascending: false });
-            const planList = (plans ||
-                []) as Pick<Plan, "id" | "title" | "branch" | "status" | "kind" | "ticket_ref" | "parent_plan_id">[];
+            const planList = (plans || []) as Pick<
+                Plan,
+                "id" | "title" | "branch" | "status" | "kind" | "ticket_ref" | "parent_plan_id" | "jira_ticket"
+            >[];
 
             const { data: ideas } = await supabase
                 .from("ideas")
@@ -632,7 +669,7 @@ server.registerTool(
                     const marker = p.id === activePlan?.id ? "→" : " ";
                     const tags = [p.kind, p.ticket_ref, p.branch].filter(Boolean).join(", ");
                     out.push(
-                        `${marker} ${p.title} [${p.status}${tags ? `, ${tags}` : ""}]${p.parent_plan_id ? ` (child of ${p.parent_plan_id})` : ""} (id: ${p.id})`
+                        `${marker} ${p.title} [${p.status}${tags ? `, ${tags}` : ""}]${formatJiraSuffix(p.jira_ticket)}${p.parent_plan_id ? ` (child of ${p.parent_plan_id})` : ""} (id: ${p.id})`
                     );
                 }
             } else {
@@ -691,7 +728,11 @@ server.registerTool(
                 .select("*")
                 .eq("plan_id", id)
                 .order("order_index", { ascending: true });
-            const lines = [`Plan: ${plan.title}`, `Focus: ${plan.focus}`, `Status: ${plan.status}`];
+            const lines = [
+                `Plan: ${plan.title}${formatJiraSuffix(plan.jira_ticket)}`,
+                `Focus: ${plan.focus}`,
+                `Status: ${plan.status}`,
+            ];
             for (const ph of (phases || []) as Phase[]) {
                 lines.push("", `[${ph.status}] ${ph.title} (id: ${ph.id})`);
                 if (ph.rollup) lines.push(`  rollup: ${ph.rollup}`);
@@ -811,6 +852,10 @@ server.registerTool(
                     "When true, create an initial active phase for spec and planning work. Defaults to true for kind='sprint', false for other kinds."
                 ),
             repo_id: z.string().optional().describe("Explicit repo override for stateless callers"),
+            jira_ticket: z
+                .string()
+                .optional()
+                .describe("Jira ticket reference to attach, e.g. 'NOC-2359' or a full URL"),
         },
     },
     async ({
@@ -823,22 +868,26 @@ server.registerTool(
         parent_plan_id,
         scaffold_planning_phase,
         repo_id,
+        jira_ticket,
     }) => {
         try {
             const repoId = repo_id || requireActive().repoId;
             const planKind = kind || DEFAULT_PLAN_KIND;
             const { data, error } = await supabase
                 .from("plans")
-                .insert({
-                    repo_id: repoId,
-                    title,
-                    focus: focus || "",
-                    branch: branch || null,
-                    worktree_path: worktree || null,
-                    kind: planKind,
-                    ticket_ref: ticket_ref || null,
-                    parent_plan_id: parent_plan_id || null,
-                })
+                .insert(
+                    buildPlanInsert({
+                        repoId,
+                        title,
+                        focus,
+                        branch,
+                        worktree,
+                        kind: planKind,
+                        ticketRef: ticket_ref,
+                        parentPlanId: parent_plan_id,
+                        jiraTicket: jira_ticket,
+                    })
+                )
                 .select("id")
                 .single();
             if (error) return err(`create_plan error: ${error.message}`);
@@ -864,7 +913,7 @@ server.registerTool(
             }
 
             return ok(
-                `Created ${planKind} plan "${title}" (id: ${data.id})${branch ? ` bound to ${branch}` : ""}${ticket_ref ? `, ${ticket_ref}` : ""}${parent_plan_id ? `, child of ${parent_plan_id}` : ""}. It is now active.${initialPhaseText}`
+                `Created ${planKind} plan "${title}" (id: ${data.id})${branch ? ` bound to ${branch}` : ""}${ticket_ref ? `, ${ticket_ref}` : ""}${parent_plan_id ? `, child of ${parent_plan_id}` : ""}${formatJiraSuffix(jira_ticket)}. It is now active.${initialPhaseText}`
             );
         } catch (e) {
             return err(`create_plan error: ${(e as Error).message}`);
@@ -906,6 +955,35 @@ server.registerTool(
             return ok(`Focus updated.`);
         } catch (e) {
             return err(`update_focus error: ${(e as Error).message}`);
+        }
+    }
+);
+
+server.registerTool(
+    "update_jira_ticket",
+    {
+        title: "Update plan Jira ticket",
+        description:
+            "Set, change, or clear the Jira ticket reference on a plan (free-form: a bare key like 'NOC-2359' or a full URL). Pass an empty string to clear.",
+        inputSchema: {
+            jira_ticket: z
+                .string()
+                .describe("Jira ticket reference, e.g. 'NOC-2359' or a full URL. Pass an empty string to clear."),
+            plan_id: z.string().optional().describe("Explicit plan override for stateless callers"),
+        },
+    },
+    async ({ jira_ticket, plan_id }) => {
+        try {
+            const target = plan_id || active.planId;
+            if (!target) return err("No active plan. Use switch_plan or create_plan.");
+            const value = normalizeJiraTicket(jira_ticket);
+            await supabase
+                .from("plans")
+                .update({ jira_ticket: value, updated_at: new Date().toISOString() })
+                .eq("id", target);
+            return ok(value ? `Jira ticket set to ${value}.` : "Jira ticket cleared.");
+        } catch (e) {
+            return err(`update_jira_ticket error: ${(e as Error).message}`);
         }
     }
 );
@@ -1395,7 +1473,7 @@ server.registerTool(
     {
         title: "Add step",
         description:
-            "Add a step to a phase. If the phase is the cursor phase and has no current step, this step becomes the cursor step.",
+            "Add a step to a phase. If the phase is the cursor phase of its plan and has no current step, this step becomes the cursor step.",
         inputSchema: {
             phase_id: z.string(),
             title: z.string(),
