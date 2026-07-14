@@ -24,6 +24,14 @@ const {
     normalizeJiraTicket,
     formatJiraSuffix,
     buildPlanInsert,
+    jiraUrl,
+    formatJiraLink,
+    normalizeConfluenceDocs,
+    formatConfluenceDocs,
+    statusIcon,
+    sessionKey,
+    resolveActiveRepoId,
+    resolveActivePlanId,
 } = await import("./index.ts");
 
 Deno.test("create_plan scaffolds planning phase by default", () => {
@@ -215,7 +223,7 @@ Deno.test("renderPlanTree nests a maintenance loop's spawned fix plans under it"
     const out = renderPlanTree([parent, child], 0);
     const lines = out.split("\n");
     assertEquals(lines.length, 2);
-    assertEquals(lines[1].startsWith("  ["), true);
+    assertEquals(lines[1].startsWith(`  ${statusIcon("active")} [`), true);
 });
 
 Deno.test("renderAttentionSection reports nothing when all is well", () => {
@@ -263,4 +271,137 @@ Deno.test("formatJiraSuffix renders a parenthetical when set", () => {
 Deno.test("formatJiraSuffix is empty when unset", () => {
     assertEquals(formatJiraSuffix(null), "");
     assertEquals(formatJiraSuffix(undefined), "");
+});
+
+// --- jira link resolution ---
+
+Deno.test("jiraUrl is null when there is no ticket", () => {
+    assertEquals(jiraUrl(null, "https://co.atlassian.net"), null);
+    assertEquals(jiraUrl(undefined, "https://co.atlassian.net"), null);
+});
+
+Deno.test("jiraUrl resolves a bare key against the configured site", () => {
+    assertEquals(jiraUrl("NOC-2359", "https://co.atlassian.net"), "https://co.atlassian.net/browse/NOC-2359");
+});
+
+Deno.test("jiraUrl strips a trailing slash from the site URL", () => {
+    assertEquals(jiraUrl("NOC-2359", "https://co.atlassian.net/"), "https://co.atlassian.net/browse/NOC-2359");
+});
+
+Deno.test("jiraUrl is null for a bare key when no site is configured", () => {
+    assertEquals(jiraUrl("NOC-2359", ""), null);
+    assertEquals(jiraUrl("NOC-2359", undefined), null);
+});
+
+Deno.test("jiraUrl passes a full URL through as-is, site or not", () => {
+    assertEquals(jiraUrl("https://co.atlassian.net/browse/NOC-2359", ""), "https://co.atlassian.net/browse/NOC-2359");
+    assertEquals(
+        jiraUrl("http://co.atlassian.net/browse/NOC-2359", "https://other.atlassian.net"),
+        "http://co.atlassian.net/browse/NOC-2359"
+    );
+});
+
+Deno.test("formatJiraLink renders a markdown link when a URL resolves", () => {
+    assertEquals(formatJiraLink("NOC-2359", "https://co.atlassian.net"), "[NOC-2359](https://co.atlassian.net/browse/NOC-2359)");
+});
+
+Deno.test("formatJiraLink falls back to plain text when no URL resolves", () => {
+    assertEquals(formatJiraLink("NOC-2359", ""), "NOC-2359");
+});
+
+Deno.test("formatJiraLink is empty when unset", () => {
+    assertEquals(formatJiraLink(null, "https://co.atlassian.net"), "");
+    assertEquals(formatJiraLink(undefined, "https://co.atlassian.net"), "");
+});
+
+// --- confluence docs ---
+
+Deno.test("normalizeConfluenceDocs drops entries without a url and trims strings", () => {
+    assertEquals(
+        normalizeConfluenceDocs([
+            { url: " https://co.atlassian.net/wiki/x ", title: " Spec " },
+            { url: "" } as { url: string },
+            { title: "no url" } as unknown as { url: string },
+        ]),
+        [{ url: "https://co.atlassian.net/wiki/x", title: "Spec" }]
+    );
+});
+
+Deno.test("normalizeConfluenceDocs is an empty array when unset", () => {
+    assertEquals(normalizeConfluenceDocs(null), []);
+    assertEquals(normalizeConfluenceDocs(undefined), []);
+});
+
+Deno.test("formatConfluenceDocs renders one markdown bullet per doc", () => {
+    assertEquals(
+        formatConfluenceDocs([
+            { url: "https://co.atlassian.net/wiki/x", title: "Spec" },
+            { url: "https://co.atlassian.net/wiki/y" },
+        ]),
+        ["- [Spec](https://co.atlassian.net/wiki/x)", "- [https://co.atlassian.net/wiki/y](https://co.atlassian.net/wiki/y)"]
+    );
+});
+
+Deno.test("formatConfluenceDocs is empty when no docs are attached", () => {
+    assertEquals(formatConfluenceDocs([]), []);
+    assertEquals(formatConfluenceDocs(undefined), []);
+});
+
+Deno.test("create_plan with confluence docs stores them normalized on the insert payload", () => {
+    assertEquals(
+        buildPlanInsert({
+            repoId: "repo-1",
+            title: "Plan A",
+            confluenceDocs: [{ url: "https://co.atlassian.net/wiki/x" }],
+        }).confluence_docs,
+        [{ url: "https://co.atlassian.net/wiki/x" }]
+    );
+});
+
+Deno.test("create_plan without confluence docs defaults to an empty array", () => {
+    assertEquals(buildPlanInsert({ repoId: "repo-1", title: "Plan A" }).confluence_docs, []);
+});
+
+// --- status icon ---
+
+Deno.test("statusIcon maps known statuses to a glanceable symbol", () => {
+    assertEquals(statusIcon("active"), "🟢");
+    assertEquals(statusIcon("running"), "🟢");
+    assertEquals(statusIcon("done"), "✅");
+    assertEquals(statusIcon("blocked"), "🔴");
+    assertEquals(statusIcon("failed"), "❌");
+    assertEquals(statusIcon("paused"), "⏸️");
+    assertEquals(statusIcon("waiting_input"), "⏳");
+    assertEquals(statusIcon("idle"), "💤");
+    assertEquals(statusIcon("todo"), "⬜");
+});
+
+Deno.test("statusIcon falls back to a dot for unknown statuses", () => {
+    assertEquals(statusIcon("some-future-status"), "•");
+});
+
+// --- active context resolution ---
+
+Deno.test("sessionKey falls back to a singleton default without a session_ref", () => {
+    assertEquals(sessionKey(), "__default__");
+    assertEquals(sessionKey(null, null), "__default__");
+    assertEquals(sessionKey("host-a", null), "__default__");
+});
+
+Deno.test("sessionKey combines host and session_ref into a stable composite key", () => {
+    assertEquals(sessionKey(null, "workspace:1"), "\0workspace:1");
+    assertEquals(sessionKey("host-a", "workspace:1"), "host-a\0workspace:1");
+});
+
+Deno.test("resolveActiveRepoId returns an explicit override and caches it for later calls", async () => {
+    assertEquals(await resolveActiveRepoId("repo-explicit"), "repo-explicit");
+    assertEquals(await resolveActiveRepoId(), "repo-explicit");
+});
+
+Deno.test("resolveActivePlanId returns an explicit override without caching it (unlike repo id)", async () => {
+    assertEquals(await resolveActivePlanId("plan-explicit"), "plan-explicit");
+    // No session_ref/DB row for this fake backend, so the follow-up call
+    // falls through the (empty) warm cache to a DB miss rather than
+    // echoing back the prior explicit override.
+    assertEquals(await resolveActivePlanId(), null);
 });
