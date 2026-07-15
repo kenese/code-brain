@@ -10,11 +10,17 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY")!;
 const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
+// Optional — base URL of the org's Jira site (e.g. "https://yourco.atlassian.net"),
+// used to turn a bare ticket key into a clickable link. Without it, bare keys
+// render as plain text (full URLs stored in jira_ticket always work either way).
+const JIRA_SITE_URL = Deno.env.get("JIRA_SITE_URL") || "";
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // --- Types ---
+type ConfluenceDoc = { url: string; title?: string };
+
 type Plan = {
     id: string;
     repo_id: string;
@@ -31,6 +37,7 @@ type Plan = {
     position_note: string;
     updated_at: string;
     jira_ticket: string | null;
+    confluence_docs: ConfluenceDoc[];
 };
 
 type Phase = {
@@ -123,6 +130,63 @@ export function formatJiraSuffix(jiraTicket?: string | null): string {
     return jiraTicket ? ` (Jira: ${jiraTicket})` : "";
 }
 
+// Resolves a freeform jira_ticket (bare key or full URL) to a browsable URL, or
+// null when it can't be resolved (no ticket, or a bare key with no site configured).
+export function jiraUrl(jiraTicket?: string | null, siteUrl?: string | null): string | null {
+    if (!jiraTicket) return null;
+    if (/^https?:\/\//i.test(jiraTicket)) return jiraTicket;
+    if (!siteUrl) return null;
+    return `${siteUrl.replace(/\/+$/, "")}/browse/${jiraTicket}`;
+}
+
+// Markdown-friendly rendering: a link when a URL resolves, otherwise the bare
+// ticket text, otherwise empty.
+export function formatJiraLink(jiraTicket?: string | null, siteUrl?: string | null): string {
+    if (!jiraTicket) return "";
+    const url = jiraUrl(jiraTicket, siteUrl);
+    return url ? `[${jiraTicket}](${url})` : jiraTicket;
+}
+
+export function normalizeConfluenceDocs(docs?: ConfluenceDoc[] | null): ConfluenceDoc[] {
+    if (!docs || !Array.isArray(docs)) return [];
+    return docs
+        .filter((d) => d && typeof d.url === "string" && d.url.trim())
+        .map((d) => ({ url: d.url.trim(), ...(d.title?.trim() ? { title: d.title.trim() } : {}) }));
+}
+
+// Markdown bullet lines, one per doc — empty array when none attached.
+export function formatConfluenceDocs(docs?: ConfluenceDoc[] | null): string[] {
+    return normalizeConfluenceDocs(docs).map((d) => `- [${d.title || d.url}](${d.url})`);
+}
+
+// Small glanceable symbol for a plan/phase/step/session status — the raw
+// [status] text is always kept alongside this, never replaced by it.
+export function statusIcon(status: string): string {
+    switch (status) {
+        case "active":
+        case "in_progress":
+        case "running":
+            return "🟢";
+        case "done":
+            return "✅";
+        case "upcoming":
+        case "todo":
+            return "⬜";
+        case "paused":
+            return "⏸️";
+        case "blocked":
+            return "🔴";
+        case "failed":
+            return "❌";
+        case "waiting_input":
+            return "⏳";
+        case "idle":
+            return "💤";
+        default:
+            return "•";
+    }
+}
+
 export function buildPlanInsert(params: {
     repoId: string;
     title: string;
@@ -133,6 +197,7 @@ export function buildPlanInsert(params: {
     ticketRef?: string;
     parentPlanId?: string;
     jiraTicket?: string;
+    confluenceDocs?: ConfluenceDoc[];
 }) {
     return {
         repo_id: params.repoId,
@@ -144,17 +209,110 @@ export function buildPlanInsert(params: {
         ticket_ref: params.ticketRef || null,
         parent_plan_id: params.parentPlanId || null,
         jira_ticket: normalizeJiraTicket(params.jiraTicket),
+        confluence_docs: normalizeConfluenceDocs(params.confluenceDocs),
     };
 }
 
-// --- Active session context (best-effort per warm instance) ---
-// connect() sets this; cursor tools read it. Tools also accept explicit
-// repo/plan overrides so a cold instance can still be driven by the agent,
-// which received these ids in the connect() bundle.
+// --- Active session context ---
+// `active` is a warm-isolate cache: connect() sets it, cursor tools read it
+// for zero-latency access. But Supabase Edge Functions give no session
+// affinity across requests, so a cold/different isolate can't see it — those
+// calls fall back to the `active_context` table, which connect() (and every
+// tool that changes the active plan) keeps durable. Tools also still accept
+// explicit repo/plan overrides for callers that want to bypass all of this.
 let active: { repoId: string | null; planId: string | null } = {
     repoId: null,
     planId: null,
 };
+
+export function sessionKey(host?: string | null, session_ref?: string | null): string {
+    return session_ref ? `${host ?? ""}\0${session_ref}` : "__default__";
+}
+
+// Persists the active repo/plan so a cold isolate can recover it. Always
+// refreshes the `__default__` row (session-less callers recover the latest
+// connect) and, when a session_ref is known, also writes a per-session row.
+async function persistActive(params: {
+    repoId: string;
+    planId?: string | null;
+    session_ref?: string | null;
+    host?: string | null;
+}) {
+    const { repoId, planId = null, session_ref, host } = params;
+    active = { repoId, planId };
+    const now = new Date().toISOString();
+    const rows = [{ session_key: "__default__", repo_id: repoId, plan_id: planId, updated_at: now }];
+    if (session_ref) {
+        rows.push({ session_key: sessionKey(host, session_ref), repo_id: repoId, plan_id: planId, updated_at: now });
+    }
+    await supabase.from("active_context").upsert(rows, { onConflict: "session_key" });
+}
+
+async function fetchActiveContextRow(
+    session_ref?: string | null,
+    host?: string | null
+): Promise<{ repo_id: string; plan_id: string | null } | null> {
+    if (session_ref) {
+        const { data } = await supabase
+            .from("active_context")
+            .select("repo_id, plan_id")
+            .eq("session_key", sessionKey(host, session_ref))
+            .maybeSingle();
+        if (data) return data;
+    }
+    const { data } = await supabase
+        .from("active_context")
+        .select("repo_id, plan_id")
+        .order("updated_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+    return data ?? null;
+}
+
+// Resolves the active repo id: explicit override > warm cache > durable
+// fallback. Refreshes the warm cache from the DB row when it was used, so a
+// cold isolate only pays the DB lookup once per warm-up.
+export async function resolveActiveRepoId(
+    explicit?: string | null,
+    opts?: { session_ref?: string | null; host?: string | null }
+): Promise<string | null> {
+    if (explicit) {
+        active = { repoId: explicit, planId: active.planId };
+        return explicit;
+    }
+    if (active.repoId) return active.repoId;
+    const row = await fetchActiveContextRow(opts?.session_ref, opts?.host);
+    if (!row) return null;
+    active = { repoId: row.repo_id, planId: row.plan_id };
+    return row.repo_id;
+}
+
+// Resolves the active plan id: explicit override > warm cache > durable
+// fallback. Unlike resolveActiveRepoId, an explicit plan_id override does not
+// imply anything about the repo, so it doesn't touch the repoId half of the
+// cache.
+export async function resolveActivePlanId(
+    explicit?: string | null,
+    opts?: { session_ref?: string | null; host?: string | null }
+): Promise<string | null> {
+    if (explicit) return explicit;
+    if (active.planId) return active.planId;
+    const row = await fetchActiveContextRow(opts?.session_ref, opts?.host);
+    if (!row) return null;
+    active = { repoId: row.repo_id, planId: row.plan_id };
+    return row.plan_id;
+}
+
+async function requireActiveRepoId(
+    explicit?: string | null,
+    opts?: { session_ref?: string | null; host?: string | null }
+): Promise<string> {
+    const repoId = await resolveActiveRepoId(explicit, opts);
+    if (!repoId) {
+        throw new Error("No active repo. Call connect(repo) first.");
+    }
+    return repoId;
+}
 
 const BASE_WORKING_CONTRACT = `--- dev-context working contract ---
 You are working under dev-context for this repo. Maintain the plan as you work, without being asked:
@@ -359,7 +517,7 @@ export function renderSessionTree(
             const stale = s.status === "running" && isSessionStale(s.last_heartbeat_at, nowMs, staleMs);
             const label = s.title || s.session_ref;
             return (
-                `${indent}- [${s.status}] ${s.role}/${label}` +
+                `${indent}- ${statusIcon(s.status)} [${s.status}] ${s.role}/${label}` +
                 `${s.plan_id ? ` (plan ${s.plan_id})` : ""}` +
                 `${s.activity ? ` — ${s.activity}` : ""}` +
                 ` · ${formatHeartbeatAge(s.last_heartbeat_at, nowMs)}${stale ? " ⚠ stale" : ""}`
@@ -398,7 +556,7 @@ export function isPlanAttentionNeeded(
 export function renderPlanLine(plan: PlanOverviewRow): string {
     const pct = plan.total_steps ? Math.round((plan.done_steps / plan.total_steps) * 100) : 0;
     const parts = [
-        `[${plan.kind}] ${plan.title}`,
+        `${statusIcon(plan.status)} [${plan.kind}] ${plan.title}`,
         `(${plan.status}${plan.ticket_ref ? `, ${plan.ticket_ref}` : ""})`,
         `— phase ${plan.done_phases}/${plan.total_phases}, ${pct}% steps done`,
     ];
@@ -454,13 +612,6 @@ function err(text: string) {
     return { content: [{ type: "text" as const, text }], isError: true };
 }
 
-function requireActive(): { repoId: string; planId: string | null } {
-    if (!active.repoId) {
-        throw new Error("No active repo. Call connect(repo) first.");
-    }
-    return { repoId: active.repoId, planId: active.planId };
-}
-
 async function loadPlan(planId: string): Promise<Plan | null> {
     const { data } = await supabase.from("plans").select("*").eq("id", planId).single();
     return (data as Plan) || null;
@@ -514,12 +665,16 @@ async function registerSessionRow(params: {
 }
 
 async function renderActivePlan(plan: Plan): Promise<string> {
-    const lines: string[] = [`### Active plan: ${plan.title}${formatJiraSuffix(plan.jira_ticket)}`];
-    lines.push(`Kind: ${plan.kind}`);
-    if (plan.focus) lines.push(`Focus: ${plan.focus}`);
-    if (plan.branch) lines.push(`Branch: ${plan.branch}`);
-    if (plan.ticket_ref) lines.push(`Ticket: ${plan.ticket_ref}`);
-    if (plan.parent_plan_id) lines.push(`Parent plan: ${plan.parent_plan_id}`);
+    const lines: string[] = [`### ${statusIcon(plan.status)} Active plan: ${plan.title}`];
+    lines.push(`**Kind:** ${plan.kind}`);
+    if (plan.focus) lines.push(`**Focus:** ${plan.focus}`);
+    if (plan.branch) lines.push(`**Branch:** ${plan.branch}`);
+    if (plan.ticket_ref) lines.push(`**Ticket:** ${plan.ticket_ref}`);
+    if (plan.parent_plan_id) lines.push(`**Parent plan:** ${plan.parent_plan_id}`);
+    const jiraLink = formatJiraLink(plan.jira_ticket, JIRA_SITE_URL);
+    if (jiraLink) lines.push(`🎫 **Jira:** ${jiraLink}`);
+    const confluenceLines = formatConfluenceDocs(plan.confluence_docs);
+    if (confluenceLines.length) lines.push("📄 **Confluence:**", ...confluenceLines);
 
     const { data: phases } = await supabase
         .from("phases")
@@ -528,12 +683,12 @@ async function renderActivePlan(plan: Plan): Promise<string> {
         .order("order_index", { ascending: true });
 
     const phaseList = (phases || []) as Phase[];
-    lines.push("", "Phases:");
+    lines.push("", "---", "**Phases:**");
     for (const ph of phaseList) {
         const marker = ph.id === plan.cursor_phase_id ? "→" : " ";
         const label =
             ph.status === "done" && ph.rollup ? `done — ${ph.rollup.split("\n")[0]}` : ph.status;
-        lines.push(`${marker} [${label}] ${ph.title}`);
+        lines.push(`${marker} ${statusIcon(ph.status)} [${label}] ${ph.title}`);
     }
 
     // Current phase's steps (titles + status only)
@@ -545,20 +700,20 @@ async function renderActivePlan(plan: Plan): Promise<string> {
             .order("order_index", { ascending: true });
         const stepList = (steps || []) as Step[];
         if (stepList.length) {
-            lines.push("", "Current phase steps:");
+            lines.push("", "---", "**Current phase steps:**");
             for (const s of stepList) {
                 const marker = s.id === plan.cursor_step_id ? "→" : " ";
-                lines.push(`${marker} [${s.status}] ${s.title}`);
+                lines.push(`${marker} ${statusIcon(s.status)} [${s.status}] ${s.title}`);
             }
             // Current step full detail + position note
             const cur = stepList.find((s) => s.id === plan.cursor_step_id);
             if (cur) {
-                lines.push("", `Current step: ${cur.title}`);
+                lines.push("", `**Current step:** ${cur.title}`);
                 if (cur.detail) lines.push(cur.detail);
             }
         }
     }
-    if (plan.position_note) lines.push("", `You are here: ${plan.position_note}`);
+    if (plan.position_note) lines.push("", `📍 **You are here:** ${plan.position_note}`);
     return lines.join("\n");
 }
 
@@ -637,7 +792,7 @@ server.registerTool(
                 if (data && data.length) activePlan = data[0] as Plan;
             }
 
-            active = { repoId: repo, planId: activePlan?.id || null };
+            await persistActive({ repoId: repo, planId: activePlan?.id || null, session_ref, host });
 
             let sessionNote = "";
             if (session_ref) {
@@ -656,20 +811,22 @@ server.registerTool(
                     : `\n(session registered: ${session_ref})`;
             }
 
-            const out: string[] = [`# dev-context: ${repo}`];
+            const out: string[] = [`# 📦 dev-context: ${repo}`];
             out.push(
                 "",
+                "---",
                 "## Architecture",
                 repoRow?.architecture_doc?.trim() || "(none yet — use update_architecture to set it)"
             );
 
-            out.push("", "## Plans");
+            out.push("", "---", "## Plans");
             if (planList.length) {
                 for (const p of planList) {
                     const marker = p.id === activePlan?.id ? "→" : " ";
                     const tags = [p.kind, p.ticket_ref, p.branch].filter(Boolean).join(", ");
+                    const jiraLink = formatJiraLink(p.jira_ticket, JIRA_SITE_URL);
                     out.push(
-                        `${marker} ${p.title} [${p.status}${tags ? `, ${tags}` : ""}]${formatJiraSuffix(p.jira_ticket)}${p.parent_plan_id ? ` (child of ${p.parent_plan_id})` : ""} (id: ${p.id})`
+                        `${marker} ${statusIcon(p.status)} ${p.title} [${p.status}${tags ? `, ${tags}` : ""}]${jiraLink ? ` (Jira: ${jiraLink})` : ""}${p.parent_plan_id ? ` (child of ${p.parent_plan_id})` : ""} (id: ${p.id})`
                     );
                 }
             } else {
@@ -677,7 +834,7 @@ server.registerTool(
             }
 
             if (ideas && ideas.length) {
-                out.push("", "## Ideas");
+                out.push("", "---", "## Ideas");
                 for (const i of ideas) out.push(`- ${i.title} (id: ${i.id})`);
             }
 
@@ -688,10 +845,10 @@ server.registerTool(
                 .is("ended_at", null)
                 .order("started_at", { ascending: true });
             if (sessionRows && sessionRows.length) {
-                out.push("", "## Active sessions", renderSessionTree(sessionRows as Session[], Date.now()));
+                out.push("", "---", "## Active sessions", renderSessionTree(sessionRows as Session[], Date.now()));
             }
 
-            out.push("");
+            out.push("", "---");
             if (activePlan) {
                 out.push(await renderActivePlan(activePlan) + sessionNote);
             } else if (branch) {
@@ -702,7 +859,7 @@ server.registerTool(
                 out.push(`No active plan resolved. Use switch_plan or create_plan.${sessionNote}`);
             }
 
-            out.push("", workingContractFor(activePlan?.kind));
+            out.push("", "---", workingContractFor(activePlan?.kind));
             return ok(out.join("\n"));
         } catch (e) {
             return err(`connect error: ${(e as Error).message}`);
@@ -856,6 +1013,10 @@ server.registerTool(
                 .string()
                 .optional()
                 .describe("Jira ticket reference to attach, e.g. 'NOC-2359' or a full URL"),
+            confluence_docs: z
+                .array(z.object({ url: z.string(), title: z.string().optional() }))
+                .optional()
+                .describe("Confluence docs to attach: array of { url, title? }"),
         },
     },
     async ({
@@ -869,9 +1030,10 @@ server.registerTool(
         scaffold_planning_phase,
         repo_id,
         jira_ticket,
+        confluence_docs,
     }) => {
         try {
-            const repoId = repo_id || requireActive().repoId;
+            const repoId = await requireActiveRepoId(repo_id);
             const planKind = kind || DEFAULT_PLAN_KIND;
             const { data, error } = await supabase
                 .from("plans")
@@ -886,12 +1048,13 @@ server.registerTool(
                         ticketRef: ticket_ref,
                         parentPlanId: parent_plan_id,
                         jiraTicket: jira_ticket,
+                        confluenceDocs: confluence_docs,
                     })
                 )
                 .select("id")
                 .single();
             if (error) return err(`create_plan error: ${error.message}`);
-            active.planId = data.id;
+            await persistActive({ repoId, planId: data.id });
 
             let initialPhaseText = "";
             if (shouldCreateInitialPlanningPhase(scaffold_planning_phase, planKind)) {
@@ -932,7 +1095,7 @@ server.registerTool(
         try {
             const plan = await loadPlan(id);
             if (!plan) return err("Plan not found.");
-            active = { repoId: plan.repo_id, planId: plan.id };
+            await persistActive({ repoId: plan.repo_id, planId: plan.id });
             return ok(await renderActivePlan(plan));
         } catch (e) {
             return err(`switch_plan error: ${(e as Error).message}`);
@@ -949,7 +1112,7 @@ server.registerTool(
     },
     async ({ text, plan_id }) => {
         try {
-            const target = plan_id || active.planId;
+            const target = await resolveActivePlanId(plan_id);
             if (!target) return err("No active plan. Use switch_plan or create_plan.");
             await supabase.from("plans").update({ focus: text, updated_at: new Date().toISOString() }).eq("id", target);
             return ok(`Focus updated.`);
@@ -974,7 +1137,7 @@ server.registerTool(
     },
     async ({ jira_ticket, plan_id }) => {
         try {
-            const target = plan_id || active.planId;
+            const target = await resolveActivePlanId(plan_id);
             if (!target) return err("No active plan. Use switch_plan or create_plan.");
             const value = normalizeJiraTicket(jira_ticket);
             await supabase
@@ -984,6 +1147,35 @@ server.registerTool(
             return ok(value ? `Jira ticket set to ${value}.` : "Jira ticket cleared.");
         } catch (e) {
             return err(`update_jira_ticket error: ${(e as Error).message}`);
+        }
+    }
+);
+
+server.registerTool(
+    "update_confluence_docs",
+    {
+        title: "Update plan Confluence docs",
+        description:
+            "Replace the Confluence docs attached to a plan (array of { url, title? }). Pass an empty array to clear.",
+        inputSchema: {
+            docs: z
+                .array(z.object({ url: z.string(), title: z.string().optional() }))
+                .describe("Confluence docs to attach, e.g. [{ url, title? }]. Pass [] to clear."),
+            plan_id: z.string().optional().describe("Explicit plan override for stateless callers"),
+        },
+    },
+    async ({ docs, plan_id }) => {
+        try {
+            const target = await resolveActivePlanId(plan_id);
+            if (!target) return err("No active plan. Use switch_plan or create_plan.");
+            const value = normalizeConfluenceDocs(docs);
+            await supabase
+                .from("plans")
+                .update({ confluence_docs: value, updated_at: new Date().toISOString() })
+                .eq("id", target);
+            return ok(value.length ? `Confluence docs set (${value.length}).` : "Confluence docs cleared.");
+        } catch (e) {
+            return err(`update_confluence_docs error: ${(e as Error).message}`);
         }
     }
 );
@@ -1013,8 +1205,8 @@ server.registerTool(
     },
     async ({ session_ref, source, host, role, title, plan_id, parent_session_ref, repo_id }) => {
         try {
-            const repoId = repo_id || requireActive().repoId;
-            const planId = plan_id || active.planId || null;
+            const repoId = await requireActiveRepoId(repo_id, { session_ref, host });
+            const planId = (await resolveActivePlanId(plan_id, { session_ref, host })) || null;
             const result = await registerSessionRow({
                 repoId,
                 sessionRef: session_ref,
@@ -1136,7 +1328,7 @@ server.registerTool(
             }
             const lines: string[] = [];
             for (const [repo, rows] of byRepo) {
-                lines.push(`### ${repo}`, renderSessionTree(rows, now), "");
+                lines.push("---", `### 📦 ${repo}`, renderSessionTree(rows, now), "");
             }
             return ok(lines.join("\n").trim());
         } catch (e) {
@@ -1219,10 +1411,28 @@ server.registerTool(
 
             const now = Date.now();
             const out: string[] = [];
-            out.push(repo_id ? `# Overview: ${repo_id}` : "# Overview: all repos");
-            out.push("", "## Plans", renderPlanTree(overviewRows, now));
-            out.push("", "## Attention", renderAttentionSection(overviewRows, sessions, now));
-            out.push("", "## Active sessions", renderSessionTree(sessions, now));
+            out.push(repo_id ? `# 📦 Overview: ${repo_id}` : "# Overview: all repos");
+
+            out.push("", "---", "## Plans");
+            if (repo_id) {
+                out.push(renderPlanTree(overviewRows, now));
+            } else {
+                const byRepo = new Map<string, PlanOverviewRow[]>();
+                for (const p of overviewRows) {
+                    if (!byRepo.has(p.repo_id)) byRepo.set(p.repo_id, []);
+                    byRepo.get(p.repo_id)!.push(p);
+                }
+                if (byRepo.size) {
+                    for (const [repo, rows] of byRepo) {
+                        out.push("", `### 📦 ${repo}`, renderPlanTree(rows, now));
+                    }
+                } else {
+                    out.push(renderPlanTree(overviewRows, now));
+                }
+            }
+
+            out.push("", "---", "## Attention", renderAttentionSection(overviewRows, sessions, now));
+            out.push("", "---", "## Active sessions", renderSessionTree(sessions, now));
             return ok(out.join("\n"));
         } catch (e) {
             return err(`overview error: ${(e as Error).message}`);
@@ -1245,7 +1455,7 @@ server.registerTool(
     },
     async ({ note, mark_in_progress, plan_id }) => {
         try {
-            const planId = plan_id || active.planId;
+            const planId = await resolveActivePlanId(plan_id);
             if (!planId) return err("No active plan. Pass plan_id explicitly or call connect first.");
             const plan = await loadPlan(planId);
             if (!plan) return err("Active plan not found.");
@@ -1276,7 +1486,7 @@ server.registerTool(
     },
     async ({ note, plan_id }) => {
         try {
-            const planId = plan_id || active.planId;
+            const planId = await resolveActivePlanId(plan_id);
             if (!planId) return err("No active plan. Pass plan_id explicitly or call connect first.");
             const plan = await loadPlan(planId);
             if (!plan || !plan.cursor_step_id) return err("No current step to complete.");
@@ -1327,7 +1537,7 @@ server.registerTool(
     },
     async ({ confirm, plan_id }) => {
         try {
-            const planId = plan_id || active.planId;
+            const planId = await resolveActivePlanId(plan_id);
             if (!planId) return err("No active plan. Pass plan_id explicitly or call connect first.");
             const plan = await loadPlan(planId);
             if (!plan || !plan.cursor_phase_id) return err("No current phase.");
@@ -1431,7 +1641,7 @@ server.registerTool(
     },
     async ({ title, plan_id, position }) => {
         try {
-            const target = plan_id || active.planId;
+            const target = await resolveActivePlanId(plan_id);
             if (!target) return err("No active plan.");
 
             const { data: existing } = await supabase
@@ -1532,7 +1742,7 @@ server.registerTool(
     },
     async ({ doc, repo }) => {
         try {
-            const target = repo || active.repoId;
+            const target = repo || (await resolveActiveRepoId());
             if (!target) return err("No active repo.");
             await supabase
                 .from("repos")
@@ -1561,7 +1771,7 @@ server.registerTool(
     },
     async ({ title, body, repo_id }) => {
         try {
-            const repoId = repo_id || requireActive().repoId;
+            const repoId = await requireActiveRepoId(repo_id);
             const { data, error } = await supabase
                 .from("ideas")
                 .insert({ repo_id: repoId, title, body: body || null })
@@ -1587,7 +1797,7 @@ server.registerTool(
     },
     async ({ repo_id }) => {
         try {
-            const repoId = repo_id || requireActive().repoId;
+            const repoId = await requireActiveRepoId(repo_id);
             const { data } = await supabase
                 .from("ideas")
                 .select("id, title")
@@ -1614,7 +1824,7 @@ server.registerTool(
     },
     async ({ idea_id, branch, repo_id }) => {
         try {
-            const repoId = repo_id || requireActive().repoId;
+            const repoId = await requireActiveRepoId(repo_id);
             const { data: idea } = await supabase.from("ideas").select("*").eq("id", idea_id).single();
             if (!idea) return err("Idea not found.");
             const { data: plan, error } = await supabase
@@ -1629,7 +1839,7 @@ server.registerTool(
                 .single();
             if (error) return err(`promote error: ${error.message}`);
             await supabase.from("ideas").delete().eq("id", idea_id);
-            active.planId = plan.id;
+            await persistActive({ repoId, planId: plan.id });
             return ok(`Promoted idea to plan "${idea.title}" (id: ${plan.id}). Now active.`);
         } catch (e) {
             return err(`promote_idea_to_plan error: ${(e as Error).message}`);
@@ -1654,7 +1864,7 @@ server.registerTool(
     },
     async ({ kind, title, body, scope, repo_id }) => {
         try {
-            const repoId = scope === "global" ? null : (repo_id || requireActive().repoId);
+            const repoId = scope === "global" ? null : await requireActiveRepoId(repo_id);
             const [embedding, metadata] = await Promise.all([
                 getEmbedding(`${title}\n\n${body}`),
                 extractKnowledgeMetadata(kind, title, body),
@@ -1705,7 +1915,7 @@ server.registerTool(
             if (scope === "global") {
                 args.only_global = true;
             } else if (scope === "repo") {
-                args.repo_filter = active.repoId; // includes globals too (RPC ORs null)
+                args.repo_filter = await resolveActiveRepoId(); // includes globals too (RPC ORs null)
             } // 'all' → no repo filter, not only_global
 
             const { data, error } = await supabase.rpc("match_knowledge", args);
