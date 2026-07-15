@@ -24,6 +24,7 @@ coverage/
 
 # Supabase local state
 supabase/.temp/
+supabase/.branches/
 
 # Logs
 *.log

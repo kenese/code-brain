@@ -8,3 +8,6 @@
 /dataSources.local.xml
 # Editor-based HTTP Client requests
 /httpRequests/
+# Local IDE cache/state, regenerated per machine
+/indexLayout.xml
+/projectSettingsUpdater.xml
