@@ -225,6 +225,27 @@ let active: { repoId: string | null; planId: string | null } = {
     planId: null,
 };
 
+// --- Per-machine repo exclusion ---
+// A machine can send `x-exclude-repos` (comma-separated repo_ids) to hide
+// specific repos from cross-repo tools (overview, list_sessions,
+// search_knowledge scope=all) without those repos ever being un-fetched from
+// the shared backend for *other* machines. Set per-request in app.post, same
+// warm-isolate-cache pattern as `active` above.
+let requestExcludeRepos: string[] = [];
+
+export function parseExcludeRepos(header?: string | null): string[] {
+    if (!header) return [];
+    return header
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+}
+
+export function isRepoExcluded(repoId: string | null | undefined, exclude: string[]): boolean {
+    if (!repoId || !exclude.length) return false;
+    return exclude.includes(repoId);
+}
+
 export function sessionKey(host?: string | null, session_ref?: string | null): string {
     return session_ref ? `${host ?? ""}\0${session_ref}` : "__default__";
 }
@@ -1315,7 +1336,9 @@ server.registerTool(
             if (!include_ended) query = query.is("ended_at", null);
             const { data, error } = await query;
             if (error) return err(`list_sessions error: ${error.message}`);
-            const sessions = (data || []) as Session[];
+            const sessions = ((data || []) as Session[]).filter(
+                (s) => !isRepoExcluded(s.repo_id, requestExcludeRepos)
+            );
             if (!sessions.length) return ok("No sessions.");
 
             const now = Date.now();
@@ -1358,7 +1381,9 @@ server.registerTool(
             if (!include_done) planQuery = planQuery.neq("status", "done");
             const { data: planRows, error: planErr } = await planQuery;
             if (planErr) return err(`overview error: ${planErr.message}`);
-            const plans = (planRows || []) as Plan[];
+            const plans = ((planRows || []) as Plan[]).filter(
+                (p) => !isRepoExcluded(p.repo_id, requestExcludeRepos)
+            );
 
             const planIds = plans.map((p) => p.id);
             const { data: phaseRows } = planIds.length
@@ -1407,7 +1432,9 @@ server.registerTool(
             let sessionQuery = supabase.from("agent_sessions").select("*").is("ended_at", null);
             if (repo_id) sessionQuery = sessionQuery.eq("repo_id", repo_id);
             const { data: sessionRows } = await sessionQuery;
-            const sessions = (sessionRows || []) as Session[];
+            const sessions = ((sessionRows || []) as Session[]).filter(
+                (s) => !isRepoExcluded(s.repo_id, requestExcludeRepos)
+            );
 
             const now = Date.now();
             const out: string[] = [];
@@ -1920,9 +1947,12 @@ server.registerTool(
 
             const { data, error } = await supabase.rpc("match_knowledge", args);
             if (error) return err(`search_knowledge error: ${error.message}`);
-            if (!data || !data.length) return ok(`No knowledge found matching "${query}".`);
+            const results = ((data || []) as Array<Record<string, unknown>>).filter(
+                (k) => !isRepoExcluded(k.repo_id as string | null, requestExcludeRepos)
+            );
+            if (!results.length) return ok(`No knowledge found matching "${query}".`);
 
-            const lines = (data as Array<Record<string, unknown>>).map((k, i) => {
+            const lines = results.map((k, i) => {
                 const m = (k.metadata || {}) as Record<string, unknown>;
                 const tags = Array.isArray(m.topics) ? (m.topics as string[]).join(", ") : "";
                 return [
@@ -1944,7 +1974,7 @@ server.registerTool(
 const corsHeaders = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers":
-        "authorization, x-client-info, apikey, content-type, x-brain-key, x-access-key, accept, mcp-session-id, mcp-protocol-version, last-event-id",
+        "authorization, x-client-info, apikey, content-type, x-brain-key, x-access-key, x-exclude-repos, accept, mcp-session-id, mcp-protocol-version, last-event-id",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
 };
 
@@ -1978,6 +2008,8 @@ app.post("*", async (c) => {
             corsHeaders
         );
     }
+
+    requestExcludeRepos = parseExcludeRepos(c.req.header("x-exclude-repos"));
 
     // Some clients omit the SSE Accept header StreamableHTTPTransport requires.
     if (!c.req.header("accept")?.includes("text/event-stream")) {

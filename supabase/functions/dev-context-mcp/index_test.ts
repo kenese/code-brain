@@ -32,6 +32,8 @@ const {
     sessionKey,
     resolveActiveRepoId,
     resolveActivePlanId,
+    parseExcludeRepos,
+    isRepoExcluded,
 } = await import("./index.ts");
 
 Deno.test("create_plan scaffolds planning phase by default", () => {
@@ -404,4 +406,31 @@ Deno.test("resolveActivePlanId returns an explicit override without caching it (
     // falls through the (empty) warm cache to a DB miss rather than
     // echoing back the prior explicit override.
     assertEquals(await resolveActivePlanId(), null);
+});
+
+Deno.test("parseExcludeRepos returns an empty list when the header is absent", () => {
+    assertEquals(parseExcludeRepos(undefined), []);
+    assertEquals(parseExcludeRepos(null), []);
+    assertEquals(parseExcludeRepos(""), []);
+});
+
+Deno.test("parseExcludeRepos splits, trims, and drops empty entries", () => {
+    assertEquals(parseExcludeRepos("kenese/eat-thing"), ["kenese/eat-thing"]);
+    assertEquals(parseExcludeRepos("kenese/eat-thing, kenese/other ,,"), [
+        "kenese/eat-thing",
+        "kenese/other",
+    ]);
+});
+
+Deno.test("isRepoExcluded matches an excluded repo_id exactly", () => {
+    assertEquals(isRepoExcluded("kenese/eat-thing", ["kenese/eat-thing"]), true);
+    assertEquals(isRepoExcluded("kenese/code-brain", ["kenese/eat-thing"]), false);
+});
+
+Deno.test("isRepoExcluded never excludes global (null repo_id) knowledge", () => {
+    assertEquals(isRepoExcluded(null, ["kenese/eat-thing"]), false);
+});
+
+Deno.test("isRepoExcluded is false when no exclusions are configured", () => {
+    assertEquals(isRepoExcluded("kenese/eat-thing", []), false);
 });

@@ -188,6 +188,15 @@ Optional, to point at a non-default `dev-context` backend deployment:
 DEV_CONTEXT_MCP_URL=https://<your-project-ref>.supabase.co/functions/v1/dev-context-mcp
 ```
 
+Optional, to hide specific repos from cross-repo tools (`overview`,
+`list_sessions`, `search_knowledge` scope `all`) on this machine only, without
+touching the shared backend data (currently wired for the Claude Code plugin's
+`.mcp.json`; Codex/Gemini would need the same header added to mirror it):
+
+```
+DEV_CONTEXT_EXCLUDE_REPOS=owner/repo-to-hide,owner/other-repo
+```
+
 Optional, only for the `SessionEnd` background safety net:
 
 ```

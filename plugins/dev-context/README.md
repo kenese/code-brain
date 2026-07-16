@@ -38,6 +38,23 @@ DEV_CONTEXT_MCP_URL=https://<your-project-ref>.supabase.co/functions/v1/dev-cont
 
 Leave it unset to use the default.
 
+**Hide specific repos on this machine (optional).** The backend is shared across
+every machine using the same access key, so repos from other machines (e.g. a
+personal project you only work on at home) otherwise show up in cross-repo tools
+(`overview`, `list_sessions`, `search_knowledge` with `scope: "all"`) everywhere.
+To hide one or more repos on *this* machine only, without touching the shared
+data or affecting other machines, set:
+
+```
+DEV_CONTEXT_EXCLUDE_REPOS=owner/repo-to-hide,owner/other-repo
+```
+
+Comma-separated `repo_id`s. This is enforced server-side (the excluded repo's
+rows are filtered out of the response), not just hidden by a skill, so it's
+never actually returned to this machine's session. Set it in this repo's
+gitignored `.claude/settings.local.json` (not the plugin's `.mcp.json`, which is
+shared) to keep it machine-local.
+
 For the **SessionEnd background safety net** (optional — summarises an abrupt
 session into the plan), also set:
 
