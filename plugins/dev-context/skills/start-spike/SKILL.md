@@ -18,6 +18,10 @@ possible).
 Ask the user directly: "What are we working on today?" This is a spike, so a
 short freeform answer is enough — don't demand ticket-level detail.
 
+Also check for an optional `skipCute` flag anywhere in the invocation args
+(e.g. `skipCute` or `skipCute=true`). When present, this run should skip
+creating a cute test environment — carry that through to step 5.
+
 ## 2. Determine the target repo
 
 Infer it from the answer (repo/project named, or obvious from context). If
@@ -52,10 +56,12 @@ start, then confirm when we're ready.
 
 Call the Skill tool for `prepare-workspace` with `repo`, `work_name`, `branch`,
 and `launch_command` set to `claude "<seed prompt from step 4>"` (shell-escape
-the prompt appropriately).
+the prompt appropriately). If `skipCute` was set in step 1, also pass
+`skip_cute=true`.
 
 ## 6. Report
 
 Relay prepare-workspace's result to the user: workspace/group, worktree path,
-branch, cute env name, and that a session is now creating the spike plan and
-will ask clarifying questions there.
+branch, cute env name (or that it was skipped, if `skipCute` was set), and
+that a session is now creating the spike plan and will ask clarifying
+questions there.

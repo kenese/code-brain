@@ -65,9 +65,10 @@ Deno.test("sprint kind still scaffolds a planning phase by default", () => {
     assertEquals(shouldCreateInitialPlanningPhase(undefined, "sprint"), true);
 });
 
-Deno.test("spike/maintenance kinds skip the planning-phase scaffold by default", () => {
+Deno.test("spike/maintenance/investigation kinds skip the planning-phase scaffold by default", () => {
     assertEquals(shouldCreateInitialPlanningPhase(undefined, "spike"), false);
     assertEquals(shouldCreateInitialPlanningPhase(undefined, "maintenance"), false);
+    assertEquals(shouldCreateInitialPlanningPhase(undefined, "investigation"), false);
 });
 
 Deno.test("explicit scaffold flag overrides the kind default either way", () => {
@@ -81,9 +82,12 @@ Deno.test("working contract includes a kind-specific addendum", () => {
     const sprint = workingContractFor("sprint");
     const spike = workingContractFor("spike");
     const maintenance = workingContractFor("maintenance");
+    const investigation = workingContractFor("investigation");
     assertEquals(sprint.includes("full engineering rigor"), true);
     assertEquals(spike.includes("quick-and-dirty") || spike.includes("prove the point"), true);
     assertEquals(maintenance.includes("parent_plan_id"), true);
+    assertEquals(investigation.includes("don't assume code is the deliverable"), true);
+    assertEquals(investigation.includes("stop and ask the user by name"), true);
 });
 
 Deno.test("working contract: missing kind behaves like the default kind (sprint)", () => {
@@ -97,6 +101,7 @@ Deno.test("working contract: a genuinely unknown kind gets no addendum", () => {
     assertEquals(unknown.includes("This is sprint work"), false);
     assertEquals(unknown.includes("This is a spike"), false);
     assertEquals(unknown.includes("This is a maintenance loop"), false);
+    assertEquals(unknown.includes("This is an investigation"), false);
 });
 
 // --- staleness ---

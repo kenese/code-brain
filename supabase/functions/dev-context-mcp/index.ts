@@ -351,6 +351,8 @@ const KIND_CONTRACT_ADDENDA: Record<string, string> = {
         "- This is a spike: move fast and prove the point. Skip heavy test coverage and polish — the goal is a clear answer or working prototype plus a written report, not production code.",
     maintenance:
         '- This is a maintenance loop: keep scanning (tickets, error logs, flaky tests) for things to fix or flag. For each concrete fix, call create_plan with parent_plan_id set to this plan (kind "sprint" or "spike") rather than fixing inline — keep this plan itself long-running and lightweight.',
+    investigation:
+        "- This is an investigation: ticket-driven, but the outcome may be a written finding, root-cause report, or recommendation rather than a code change — don't assume code is the deliverable. Read logs, dig through code history, and query whatever other systems (Jira, Confluence, dashboards, databases) you need before concluding anything. If you're missing data or access you don't have and don't know how to get, stop and ask the user by name rather than guessing, stalling, or fabricating a plausible-sounding answer.",
 };
 
 export function workingContractFor(kind?: string | null): string {
@@ -1008,7 +1010,7 @@ server.registerTool(
     {
         title: "Create plan",
         description:
-            'Create a new plan (line of work) in the active repo, optionally bound to a git branch. Becomes the active plan. `kind` shapes agent behavior via the working contract injected at connect — starter set: "sprint" (branch + ticket, full engineering rigor, default), "spike" (loose plan, quick-and-dirty exploration/research), "maintenance" (long-running loop that spawns child plans per fix via parent_plan_id). Freeform — any kind is accepted.',
+            'Create a new plan (line of work) in the active repo, optionally bound to a git branch. Becomes the active plan. `kind` shapes agent behavior via the working contract injected at connect — starter set: "sprint" (branch + ticket, full engineering rigor, default), "spike" (loose plan, quick-and-dirty exploration/research), "maintenance" (long-running loop that spawns child plans per fix via parent_plan_id), "investigation" (ticket-driven, outcome may be a report/finding rather than code, ask the user when data or access is missing). Freeform — any kind is accepted.',
         inputSchema: {
             title: z.string(),
             focus: z.string().optional(),
@@ -1017,7 +1019,7 @@ server.registerTool(
             kind: z
                 .string()
                 .optional()
-                .describe('Work style: "sprint" (default) | "spike" | "maintenance" | freeform'),
+                .describe('Work style: "sprint" (default) | "spike" | "maintenance" | "investigation" | freeform'),
             ticket_ref: z.string().optional().describe("External ticket reference, e.g. a Jira key"),
             parent_plan_id: z
                 .string()

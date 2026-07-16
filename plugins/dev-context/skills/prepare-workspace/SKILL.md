@@ -22,8 +22,11 @@ or plainly in the invocation message — parse whichever form you receive):
 - `launch_command` — the exact shell command to run in the new workspace once
   it's ready, e.g. `claude "Starting new work on NOC-2359: ..."`. This is what
   actually starts the child Claude session and seeds its first turn.
+- `skip_cute` — optional boolean, default false. When true, skip step 2
+  entirely — no cute environment is created for this work.
 
-If any of these is missing, stop and ask the caller/user rather than guessing.
+If any of the required inputs is missing, stop and ask the caller/user rather
+than guessing.
 
 ## 1. Resolve the repo's cmux group + local path
 
@@ -45,14 +48,12 @@ If **no group matches**:
 
 ## 2. Create the cute test environment
 
-Run (Bash, fire-and-forget — don't block waiting for it to finish provisioning):
+If `skip_cute` is true, skip this step entirely — proceed to step 3 with no
+env name to report.
 
-```
-cute create -name "kenese-<work_name>" -notify
-```
-
-Note the env name in your final report. If `cute create` errors immediately
-(bad name, quota, etc.), surface the error and stop rather than continuing to a
+Otherwise, call the Skill tool for `create-cute-env` with `name` set to
+`"kenese-<work_name>"`. Note the env name it returns in your final report. If
+it reports an error, surface it and stop rather than continuing to a
 half-set-up state.
 
 ## 3. Create the git worktree
@@ -92,5 +93,6 @@ cmux notify --title "<work_name> ready" --body "Workspace, worktree, and cute en
 ## 6. Report back
 
 Tell the caller/user, concisely: the new workspace ref/name, the group it landed
-in, the worktree path, the branch, and the cute env name. This is what
-`start-ticket`/`start-spike` relay in their own final summary.
+in, the worktree path, the branch, and the cute env name (or that it was
+skipped, if `skip_cute` was set). This is what `start-ticket`/`start-spike`
+relay in their own final summary.

@@ -79,13 +79,17 @@ doing that work as a tree — without dev-context itself touching cmux/tmux (it'
 remote Supabase function; the *orchestrator agent* does the actual spawning via its
 own terminal-multiplexer tools, and just reports state back).
 
-- **Plan `kind`** — every plan has a freeform `kind` (`sprint` by default; `spike`
-  and `maintenance` are the other built-ins). `connect` returns a kind-specific
-  working contract: `sprint` holds to full engineering rigor and tests before
-  `complete_phase`; `spike` says move fast, skip heavy test coverage, prove the
-  point; `maintenance` says stay long-running and spawn a child plan
-  (`parent_plan_id`) per concrete fix rather than fixing inline. `create_plan`
-  takes `kind`, `ticket_ref` (e.g. a Jira key), and `parent_plan_id`.
+- **Plan `kind`** — every plan has a freeform `kind` (`sprint` by default; `spike`,
+  `maintenance`, and `investigation` are the other built-ins). `connect` returns a
+  kind-specific working contract: `sprint` holds to full engineering rigor and
+  tests before `complete_phase`; `spike` says move fast, skip heavy test
+  coverage, prove the point; `maintenance` says stay long-running and spawn a
+  child plan (`parent_plan_id`) per concrete fix rather than fixing inline;
+  `investigation` says the outcome may be a written finding or report rather
+  than a code change, dig through logs/history/other systems before
+  concluding, and stop to ask the user when data or access is missing rather
+  than guessing. `create_plan` takes `kind`, `ticket_ref` (e.g. a Jira key), and
+  `parent_plan_id`.
 - **Agent sessions** — `register_session` upserts a running agent keyed on
   whatever stable ref it reports (e.g. a cmux `workspace:`/`surface:` ref from an
   `identify`-style tool, or a tmux pane) plus `host`/`source` to disambiguate

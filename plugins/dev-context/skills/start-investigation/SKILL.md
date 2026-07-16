@@ -1,16 +1,17 @@
 ---
-name: start-ticket
-description: Kick off a new piece of work from a Jira ticket — sets up a cmux workspace/worktree/cute env for it, then launches a Claude session there that creates a full-rigor dev-context sprint plan from the ticket and asks clarifying questions. Use when the user runs "/start-ticket jira=XXX-000" or otherwise says to start work on a specific Jira ticket.
+name: start-investigation
+description: Kick off an investigation from a Jira ticket — bug root-causing, "why is X flaky", or a spike-with-a-ticket where the outcome may be a written finding/report rather than a code change. Sets up a cmux workspace/worktree/cute env for it, then launches a Claude session there that creates a full-rigor-but-code-need-not-follow dev-context investigation plan from the ticket and asks clarifying questions. Use when the user runs "/start-investigation jira=XXX-000" or otherwise says to investigate a specific Jira ticket. Different from start-ticket (sprint, assumes a code change) and start-spike (no ticket, loose exploration).
 ---
 
-# Start ticket
+# Start investigation
 
-Turns a Jira ticket into a running, plan-tracked piece of work in its own
+Turns a Jira ticket into a running, plan-tracked investigation in its own
 workspace. Run from the orchestrator session — this skill does the setup and
-hands off; it does not itself write code or create the plan (that happens in
-the spawned session, which follows dev-context's `sprint` working contract:
-full engineering rigor, tests, review-quality code before any phase is called
-done).
+hands off; it does not itself do the investigating or create the plan (that
+happens in the spawned session, which follows dev-context's `investigation`
+working contract: the outcome may be a written finding, root-cause report, or
+recommendation rather than a code change, and missing data or access is a
+reason to stop and ask, not to guess or stall).
 
 ## 1. Parse the ticket key
 
@@ -44,7 +45,10 @@ repo for real work.
 - `branch` — the ticket key, lowercased (e.g. `noc-2359`), unless the repo has
   an obviously different convention you can see from recent branches
   (`git -C <repo-path> branch -a --sort=-committerdate | head`) — match that
-  instead if so.
+  instead if so. Still create a branch/worktree even though the investigation
+  may not end in a commit: `prepare-workspace` needs one, and a written
+  finding may still want to live in the repo (e.g. as a docs page or plan
+  artifact).
 - `title` — the ticket summary.
 
 ## 5. Build the seed prompt
@@ -53,14 +57,17 @@ This is the first message the spawned Claude session receives — write it so
 that session has everything it needs without re-fetching the ticket itself:
 
 ```
-Starting new work on <KEY>: <summary>.
+Starting an investigation into <KEY>: <summary>.
 
 <description, verbatim or lightly trimmed>
 
-Create a dev-context plan for this with create_plan(kind="sprint",
+Create a dev-context plan for this with create_plan(kind="investigation",
 jira_ticket="<KEY>", branch="<branch>", title="<summary>", focus="<one-line
-focus>"). Then ask me any clarifying questions you have about scope or
-approach before writing code, and confirm when we're ready to start.
+focus>"). The outcome here may be a finding or report rather than code — do
+not assume a code change is required. If you need data or access you do not
+have (logs, dashboards, credentials, another system), stop and ask me by name
+rather than guessing or stalling. Then ask me any clarifying questions you
+have about scope before you start, and confirm when we're ready.
 ```
 
 Keep the description faithful to the ticket — don't invent scope or acceptance
