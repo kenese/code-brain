@@ -692,6 +692,30 @@ async function resolveCurrentPhaseId(
     return (data || [])[0]?.id ?? null;
 }
 
+// Renders the confirm=false preview for delete_plan: what will be deleted
+// outright (the plan's own phases/steps, via ON DELETE CASCADE) versus what
+// will merely be detached (child plans linked via parent_plan_id, and agent
+// sessions — both ON DELETE SET NULL — so they survive as orphans rather than
+// being deleted themselves).
+export function buildDeletePlanPreview(
+    plan: Pick<Plan, "title" | "status">,
+    counts: { phases: number; childPlans: number; sessions: number }
+): string {
+    return [
+        `About to permanently delete plan "${plan.title}" (status: ${plan.status}).`,
+        `${counts.phases} phase(s) and their steps will be deleted along with it.`,
+        counts.childPlans
+            ? `${counts.childPlans} child plan(s) (linked via parent_plan_id) will be orphaned, not deleted.`
+            : null,
+        counts.sessions
+            ? `${counts.sessions} agent session(s) referencing this plan will have their plan_id cleared.`
+            : null,
+        "This cannot be undone. Confirm with the user, then call delete_plan(plan_id, confirm=true).",
+    ]
+        .filter(Boolean)
+        .join("\n");
+}
+
 // Shared by the register_session tool and connect() (which auto-registers the
 // caller's session, if it reports one, in the same call that resolves the plan).
 async function registerSessionRow(params: {
@@ -1174,6 +1198,51 @@ server.registerTool(
             return ok(await renderActivePlan(plan));
         } catch (e) {
             return err(`switch_plan error: ${(e as Error).message}`);
+        }
+    }
+);
+
+server.registerTool(
+    "delete_plan",
+    {
+        title: "Delete plan",
+        description:
+            "Permanently delete a plan and its phases/steps. Irreversible — SURFACE THIS TO THE USER FIRST: call with confirm=false to preview what will be deleted, then confirm=true once the user agrees.",
+        inputSchema: {
+            plan_id: z.string().describe("Plan to delete — always explicit, never inferred from session/connect state"),
+            confirm: z.boolean().optional().default(false),
+        },
+    },
+    async ({ plan_id, confirm }) => {
+        try {
+            const plan = await loadPlan(plan_id);
+            if (!plan) return err("Plan not found.");
+
+            const { data: phases } = await supabase.from("phases").select("id").eq("plan_id", plan_id);
+            const { data: childPlans } = await supabase.from("plans").select("id").eq("parent_plan_id", plan_id);
+            const { data: sessions } = await supabase.from("agent_sessions").select("id").eq("plan_id", plan_id);
+
+            if (!confirm) {
+                return ok(
+                    buildDeletePlanPreview(plan, {
+                        phases: (phases || []).length,
+                        childPlans: (childPlans || []).length,
+                        sessions: (sessions || []).length,
+                    })
+                );
+            }
+
+            const { error } = await supabase.from("plans").delete().eq("id", plan_id);
+            if (error) return err(`delete_plan error: ${error.message}`);
+
+            // The plan may still be the warm isolate's cached "active" plan —
+            // clear it so a subsequent call doesn't keep resolving to a
+            // deleted row until the next connect()/switch_plan().
+            if (active.planId === plan_id) active = { ...active, planId: null };
+
+            return ok(`Plan "${plan.title}" deleted.`);
+        } catch (e) {
+            return err(`delete_plan error: ${(e as Error).message}`);
         }
     }
 );

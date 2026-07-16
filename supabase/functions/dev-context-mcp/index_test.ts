@@ -36,6 +36,7 @@ const {
     isRepoExcluded,
     findCurrentStep,
     resolveCursorStep,
+    buildDeletePlanPreview,
 } = await import("./index.ts");
 
 Deno.test("create_plan scaffolds planning phase by default", () => {
@@ -523,4 +524,52 @@ Deno.test("resolveCursorStep: an explicit plan_id is resolved independently of a
     // resolveActivePlanId itself: passing a different plan_id explicitly wins
     // over whatever was previously resolved, and does not get cached over it.
     assertEquals(await resolveActivePlanId("plan-explicit-2"), "plan-explicit-2");
+});
+
+// --- delete_plan preview ---
+
+Deno.test("buildDeletePlanPreview: bare plan with no phases/children/sessions", () => {
+    const preview = buildDeletePlanPreview(
+        { title: "Fix flaky test", status: "active" },
+        { phases: 0, childPlans: 0, sessions: 0 }
+    );
+    assertEquals(
+        preview,
+        [
+            'About to permanently delete plan "Fix flaky test" (status: active).',
+            "0 phase(s) and their steps will be deleted along with it.",
+            "This cannot be undone. Confirm with the user, then call delete_plan(plan_id, confirm=true).",
+        ].join("\n")
+    );
+});
+
+Deno.test("buildDeletePlanPreview: reports phase count and omits child/session lines when zero", () => {
+    const preview = buildDeletePlanPreview(
+        { title: "Migrate auth", status: "active" },
+        { phases: 3, childPlans: 0, sessions: 0 }
+    );
+    assertEquals(preview.includes("3 phase(s) and their steps will be deleted along with it."), true);
+    assertEquals(preview.includes("child plan"), false);
+    assertEquals(preview.includes("agent session"), false);
+});
+
+Deno.test("buildDeletePlanPreview: surfaces child plans as orphaned, not deleted", () => {
+    const preview = buildDeletePlanPreview(
+        { title: "Maintenance loop", status: "active" },
+        { phases: 1, childPlans: 2, sessions: 0 }
+    );
+    assertEquals(preview.includes("2 child plan(s) (linked via parent_plan_id) will be orphaned, not deleted."), true);
+});
+
+Deno.test("buildDeletePlanPreview: surfaces sessions whose plan_id will be cleared", () => {
+    const preview = buildDeletePlanPreview(
+        { title: "Sprint work", status: "active" },
+        { phases: 1, childPlans: 0, sessions: 1 }
+    );
+    assertEquals(preview.includes("1 agent session(s) referencing this plan will have their plan_id cleared."), true);
+});
+
+Deno.test("buildDeletePlanPreview: always ends with the explicit confirm instruction", () => {
+    const preview = buildDeletePlanPreview({ title: "Anything", status: "done" }, { phases: 0, childPlans: 0, sessions: 0 });
+    assertEquals(preview.endsWith("Confirm with the user, then call delete_plan(plan_id, confirm=true)."), true);
 });
