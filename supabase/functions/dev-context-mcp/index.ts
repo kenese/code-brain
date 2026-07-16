@@ -640,6 +640,58 @@ async function loadPlan(planId: string): Promise<Plan | null> {
     return (data as Plan) || null;
 }
 
+// The step a caller should be working on right now, given a phase's steps:
+// an in_progress step wins (someone's already on it), otherwise the first
+// not-done step in order. Null when every step is done (or there are none).
+export function findCurrentStep(steps: Step[]): Step | null {
+    const sorted = [...steps].sort((a, b) => a.order_index - b.order_index);
+    return (
+        sorted.find((s) => s.status === "in_progress") ||
+        sorted.find((s) => s.status !== "done") ||
+        null
+    );
+}
+
+// Resolves which step complete_step/update_progress should act on for a
+// given (already-resolved) phase, self-healing when the plan's stored
+// cursor_step_id has gone stale — e.g. it points at a step that's done or
+// belongs to a different phase, or it's null even though the phase plainly
+// has open steps (this happens whenever a phase becomes the cursor phase
+// before it has any steps yet — complete_phase transitioning into a
+// not-yet-populated phase — and a later add_step call didn't win the
+// cursor-adoption race). `healed` tells the caller whether the resolved
+// step differs from `plan.cursor_step_id` and so needs to be persisted back.
+export function resolveCursorStep(
+    plan: Pick<Plan, "cursor_phase_id" | "cursor_step_id">,
+    phaseId: string,
+    phaseSteps: Step[]
+): { stepId: string; healed: boolean } | null {
+    if (plan.cursor_phase_id === phaseId && plan.cursor_step_id) {
+        const claimed = phaseSteps.find((s) => s.id === plan.cursor_step_id && s.status !== "done");
+        if (claimed) return { stepId: claimed.id, healed: false };
+    }
+    const current = findCurrentStep(phaseSteps);
+    return current ? { stepId: current.id, healed: true } : null;
+}
+
+// Resolves the plan's current phase id, self-healing when cursor_phase_id is
+// null (or stale) by falling back to whichever phase is actually marked
+// 'active' in the DB.
+async function resolveCurrentPhaseId(
+    planId: string,
+    plan: Pick<Plan, "cursor_phase_id">
+): Promise<string | null> {
+    if (plan.cursor_phase_id) return plan.cursor_phase_id;
+    const { data } = await supabase
+        .from("phases")
+        .select("id")
+        .eq("plan_id", planId)
+        .eq("status", "active")
+        .order("order_index", { ascending: true })
+        .limit(1);
+    return (data || [])[0]?.id ?? null;
+}
+
 // Shared by the register_session tool and connect() (which auto-registers the
 // caller's session, if it reports one, in the same call that resolves the plan).
 async function registerSessionRow(params: {
@@ -1492,8 +1544,30 @@ server.registerTool(
                 .from("plans")
                 .update({ position_note: note, updated_at: new Date().toISOString() })
                 .eq("id", planId);
-            if (mark_in_progress && plan.cursor_step_id) {
-                await supabase.from("steps").update({ status: "in_progress" }).eq("id", plan.cursor_step_id);
+
+            if (mark_in_progress) {
+                const phaseId = await resolveCurrentPhaseId(planId, plan);
+                if (phaseId) {
+                    const { data: stepsData } = await supabase
+                        .from("steps")
+                        .select("*")
+                        .eq("phase_id", phaseId)
+                        .order("order_index", { ascending: true });
+                    const resolved = resolveCursorStep(plan, phaseId, (stepsData || []) as Step[]);
+                    if (resolved) {
+                        await supabase.from("steps").update({ status: "in_progress" }).eq("id", resolved.stepId);
+                        if (resolved.healed) {
+                            await supabase
+                                .from("plans")
+                                .update({
+                                    cursor_phase_id: phaseId,
+                                    cursor_step_id: resolved.stepId,
+                                    updated_at: new Date().toISOString(),
+                                })
+                                .eq("id", planId);
+                        }
+                    }
+                }
             }
             return ok("Progress noted.");
         } catch (e) {
@@ -1518,18 +1592,29 @@ server.registerTool(
             const planId = await resolveActivePlanId(plan_id);
             if (!planId) return err("No active plan. Pass plan_id explicitly or call connect first.");
             const plan = await loadPlan(planId);
-            if (!plan || !plan.cursor_step_id) return err("No current step to complete.");
+            if (!plan) return err("Active plan not found.");
+
+            const phaseId = await resolveCurrentPhaseId(planId, plan);
+            if (!phaseId) return err("No current phase.");
+
+            const { data: stepsData } = await supabase
+                .from("steps")
+                .select("*")
+                .eq("phase_id", phaseId)
+                .order("order_index", { ascending: true });
+            const resolved = resolveCursorStep(plan, phaseId, (stepsData || []) as Step[]);
+            if (!resolved) return err("No current step to complete.");
 
             await supabase
                 .from("steps")
                 .update({ status: "done", ...(note ? { progress_note: note } : {}) })
-                .eq("id", plan.cursor_step_id);
+                .eq("id", resolved.stepId);
 
             // Find next todo step in the same phase
             const { data: steps } = await supabase
                 .from("steps")
                 .select("*")
-                .eq("phase_id", plan.cursor_phase_id!)
+                .eq("phase_id", phaseId)
                 .order("order_index", { ascending: true });
             const next = ((steps || []) as Step[]).find((s) => s.status === "todo");
 
@@ -1537,13 +1622,13 @@ server.registerTool(
                 await supabase.from("steps").update({ status: "in_progress" }).eq("id", next.id);
                 await supabase
                     .from("plans")
-                    .update({ cursor_step_id: next.id, updated_at: new Date().toISOString() })
+                    .update({ cursor_phase_id: phaseId, cursor_step_id: next.id, updated_at: new Date().toISOString() })
                     .eq("id", planId);
                 return ok(`Step completed. Now on: ${next.title}`);
             } else {
                 await supabase
                     .from("plans")
-                    .update({ cursor_step_id: null, updated_at: new Date().toISOString() })
+                    .update({ cursor_phase_id: phaseId, cursor_step_id: null, updated_at: new Date().toISOString() })
                     .eq("id", planId);
                 return ok("Step completed. No more todo steps in this phase — consider complete_phase.");
             }
@@ -1739,19 +1824,24 @@ server.registerTool(
             // If this phase is its plan's cursor phase with no current step, adopt it.
             // Looked up via the phase's own plan_id, not the in-memory `active` var — a
             // stateless caller (or a cold function instance) must not lose cursor adoption.
-            const { data: phaseRow } = await supabase
-                .from("phases")
-                .select("plan_id")
-                .eq("id", phase_id)
-                .single();
+            const { data: phaseRow } = await supabase.from("phases").select("plan_id").eq("id", phase_id).single();
             if (phaseRow) {
-                const plan = await loadPlan(phaseRow.plan_id);
-                if (plan && plan.cursor_phase_id === phase_id && !plan.cursor_step_id) {
+                // Atomic claim: only adopt the cursor if this phase is still the plan's
+                // cursor phase AND no step has claimed the cursor yet. A plain
+                // read-then-write here would race when multiple add_step calls run
+                // concurrently (e.g. an agent batching independent tool calls) — two
+                // calls could both read cursor_step_id as null and both "win". The
+                // WHERE clause makes Postgres itself the arbiter: only one UPDATE can
+                // match a still-null cursor_step_id row.
+                const { data: claimed } = await supabase
+                    .from("plans")
+                    .update({ cursor_step_id: data.id, updated_at: new Date().toISOString() })
+                    .eq("id", phaseRow.plan_id)
+                    .eq("cursor_phase_id", phase_id)
+                    .is("cursor_step_id", null)
+                    .select("id");
+                if (claimed && claimed.length) {
                     await supabase.from("steps").update({ status: "in_progress" }).eq("id", data.id);
-                    await supabase
-                        .from("plans")
-                        .update({ cursor_step_id: data.id, updated_at: new Date().toISOString() })
-                        .eq("id", phaseRow.plan_id);
                 }
             }
             return ok(`Added step "${title}" (id: ${data.id}).`);

@@ -34,6 +34,8 @@ const {
     resolveActivePlanId,
     parseExcludeRepos,
     isRepoExcluded,
+    findCurrentStep,
+    resolveCursorStep,
 } = await import("./index.ts");
 
 Deno.test("create_plan scaffolds planning phase by default", () => {
@@ -438,4 +440,87 @@ Deno.test("isRepoExcluded never excludes global (null repo_id) knowledge", () =>
 
 Deno.test("isRepoExcluded is false when no exclusions are configured", () => {
     assertEquals(isRepoExcluded("kenese/eat-thing", []), false);
+});
+
+// --- findCurrentStep / resolveCursorStep (cursor self-healing) ---
+
+function step(id: string, order_index: number, status: string) {
+    return { id, phase_id: "phase-1", title: id, detail: "", progress_note: null, status, order_index };
+}
+
+Deno.test("findCurrentStep returns null for an empty phase", () => {
+    assertEquals(findCurrentStep([]), null);
+});
+
+Deno.test("findCurrentStep returns null when every step is done", () => {
+    const steps = [step("s1", 0, "done"), step("s2", 1, "done")];
+    assertEquals(findCurrentStep(steps), null);
+});
+
+Deno.test("findCurrentStep picks the first not-done step by order_index, regardless of input order", () => {
+    const steps = [step("s3", 2, "todo"), step("s1", 0, "todo"), step("s2", 1, "todo")];
+    assertEquals(findCurrentStep(steps)?.id, "s1");
+});
+
+Deno.test("findCurrentStep prefers an in_progress step over an earlier todo step", () => {
+    const steps = [step("s1", 0, "todo"), step("s2", 1, "in_progress"), step("s3", 2, "todo")];
+    assertEquals(findCurrentStep(steps)?.id, "s2");
+});
+
+Deno.test("findCurrentStep skips done steps to find the next todo one", () => {
+    const steps = [step("s1", 0, "done"), step("s2", 1, "done"), step("s3", 2, "todo")];
+    assertEquals(findCurrentStep(steps)?.id, "s3");
+});
+
+Deno.test("resolveCursorStep: freshly created plan with no cursor set resolves to the first todo step and reports healed", () => {
+    const plan = { cursor_phase_id: "phase-1", cursor_step_id: null };
+    const steps = [step("s1", 0, "todo"), step("s2", 1, "todo"), step("s3", 2, "todo")];
+    const resolved = resolveCursorStep(plan, "phase-1", steps);
+    assertEquals(resolved, { stepId: "s1", healed: true });
+});
+
+Deno.test("resolveCursorStep: an explicitly-set, still-open cursor step is trusted as-is (not healed)", () => {
+    const plan = { cursor_phase_id: "phase-1", cursor_step_id: "s2" };
+    const steps = [step("s1", 0, "todo"), step("s2", 1, "in_progress"), step("s3", 2, "todo")];
+    const resolved = resolveCursorStep(plan, "phase-1", steps);
+    assertEquals(resolved, { stepId: "s2", healed: false });
+});
+
+Deno.test("resolveCursorStep: heals when the stored cursor step has gone stale (already done)", () => {
+    const plan = { cursor_phase_id: "phase-1", cursor_step_id: "s1" };
+    const steps = [step("s1", 0, "done"), step("s2", 1, "todo"), step("s3", 2, "todo")];
+    const resolved = resolveCursorStep(plan, "phase-1", steps);
+    assertEquals(resolved, { stepId: "s2", healed: true });
+});
+
+Deno.test("resolveCursorStep: heals when the cursor points at a different phase than the one being resolved", () => {
+    // e.g. plan.cursor_phase_id still references a prior phase, but the caller
+    // is resolving against the phase that's actually active in the DB.
+    const plan = { cursor_phase_id: "phase-0", cursor_step_id: "s0" };
+    const steps = [step("s1", 0, "todo"), step("s2", 1, "todo")];
+    const resolved = resolveCursorStep(plan, "phase-1", steps);
+    assertEquals(resolved, { stepId: "s1", healed: true });
+});
+
+Deno.test("resolveCursorStep: returns null when the resolved phase has no open steps left", () => {
+    const plan = { cursor_phase_id: "phase-1", cursor_step_id: null };
+    const steps = [step("s1", 0, "done"), step("s2", 1, "done")];
+    assertEquals(resolveCursorStep(plan, "phase-1", steps), null);
+});
+
+Deno.test("resolveCursorStep: an explicit plan_id is resolved independently of a different implicit active plan", async () => {
+    // Mirrors the reported repro: the session/warm-cache may consider a
+    // different plan "active" (or none at all), but a caller passing plan_id
+    // explicitly must still resolve cleanly against that plan's own steps.
+    const implicitActive = await resolveActivePlanId("plan-implicit");
+    assertEquals(implicitActive, "plan-implicit");
+
+    const explicitPlan = { cursor_phase_id: "phase-1", cursor_step_id: null };
+    const explicitSteps = [step("s1", 0, "todo"), step("s2", 1, "todo")];
+    const resolvedForExplicitPlan = resolveCursorStep(explicitPlan, "phase-1", explicitSteps);
+    assertEquals(resolvedForExplicitPlan, { stepId: "s1", healed: true });
+
+    // resolveActivePlanId itself: passing a different plan_id explicitly wins
+    // over whatever was previously resolved, and does not get cached over it.
+    assertEquals(await resolveActivePlanId("plan-explicit-2"), "plan-explicit-2");
 });
