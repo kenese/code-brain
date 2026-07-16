@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "dev-context": {
+      "url": "https://dpwdbusvukzbmcxvhkuh.supabase.co/functions/v1/dev-context-mcp",
+      "headers": {
+        "x-access-key": "${DEV_CONTEXT_MCP_KEY}",
+        "x-exclude-repos": "${DEV_CONTEXT_EXCLUDE_REPOS}"
+      }
+    }
+  }
+}

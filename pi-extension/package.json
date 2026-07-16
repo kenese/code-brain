@@ -1,0 +1,14 @@
+{
+  "name": "pi-extension-dev-context",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Per-repo coding context + reusable knowledge MCP, with auto-connect/checkpoint hooks, for the pi coding agent.",
+  "type": "module",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./extensions"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

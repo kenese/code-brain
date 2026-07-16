@@ -1,6 +1,7 @@
 {
   "scripts": {
-    "validate:codex-plugin": "node scripts/validate-codex-plugin.mjs"
+    "validate:codex-plugin": "node scripts/validate-codex-plugin.mjs",
+    "validate:pi-extension": "node scripts/validate-pi-extension.mjs"
   },
   "dependencies": {
     "deno": "^2.7.14"
